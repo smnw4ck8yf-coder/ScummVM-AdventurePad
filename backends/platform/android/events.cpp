@@ -88,6 +88,7 @@ enum {
 	JE_MOUSE_WHEEL_UP = 22,
 	JE_MOUSE_WHEEL_DOWN = 23,
 	JE_TV_REMOTE = 24,
+	JE_MOUSE_BUTTON = 25,
 	JE_QUIT = 0x1000,
 	JE_MENU = 0x1001
 };
@@ -1114,6 +1115,33 @@ void OSystem_Android::pushEvent(int type, int arg1, int arg2, int arg3,
 
 		default:
 			LOGE("unhandled JE_BALL jaction on system key: %d", arg1);
+			return;
+		}
+		pushEvent(ev0);
+		break;
+
+	case JE_MOUSE_BUTTON:
+		ev0.mouse = dynamic_cast<AndroidGraphicsManager *>(_graphicsManager)->getMousePosition();
+		if (arg2 == AMOTION_EVENT_BUTTON_PRIMARY) {
+			if (arg1 == AMOTION_EVENT_ACTION_DOWN)
+				ev0.type = Common::EVENT_LBUTTONDOWN;
+			else if (arg1 == AMOTION_EVENT_ACTION_UP)
+				ev0.type = Common::EVENT_LBUTTONUP;
+			else {
+				LOGE("unhandled JE_MOUSE_BUTTON primary action: %d", arg1);
+				return;
+			}
+		} else if (arg2 == AMOTION_EVENT_BUTTON_SECONDARY) {
+			if (arg1 == AMOTION_EVENT_ACTION_DOWN)
+				ev0.type = Common::EVENT_RBUTTONDOWN;
+			else if (arg1 == AMOTION_EVENT_ACTION_UP)
+				ev0.type = Common::EVENT_RBUTTONUP;
+			else {
+				LOGE("unhandled JE_MOUSE_BUTTON secondary action: %d", arg1);
+				return;
+			}
+		} else {
+			LOGE("unhandled JE_MOUSE_BUTTON button: %d", arg2);
 			return;
 		}
 		pushEvent(ev0);

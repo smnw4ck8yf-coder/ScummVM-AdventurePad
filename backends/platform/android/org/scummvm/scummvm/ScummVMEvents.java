@@ -73,6 +73,7 @@ public class ScummVMEvents implements
 	public static final int JE_MOUSE_WHEEL_UP = 22;
 	public static final int JE_MOUSE_WHEEL_DOWN = 23;
 	public static final int JE_TV_REMOTE = 24;
+	public static final int JE_MOUSE_BUTTON = 25;
 	public static final int JE_QUIT = 0x1000;
 	public static final int JE_MENU = 0x1001;
 

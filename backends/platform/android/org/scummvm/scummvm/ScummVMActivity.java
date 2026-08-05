@@ -23,6 +23,8 @@ package org.scummvm.scummvm;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.ActivityManager;
+import android.app.ActivityOptions;
 import android.app.AlertDialog;
 import android.content.BroadcastReceiver;
 import android.content.ClipboardManager;
@@ -36,6 +38,7 @@ import android.content.res.AssetManager;
 import android.content.res.Configuration;
 import android.content.res.Resources;
 import android.graphics.Rect;
+import android.hardware.display.DisplayManager;
 import android.hardware.usb.UsbConstants;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbInterface;
@@ -61,6 +64,7 @@ import android.util.DisplayMetrics;
 import android.util.Log;
 import android.util.TypedValue;
 import android.view.Gravity;
+import android.view.Display;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.SurfaceHolder;
@@ -96,6 +100,14 @@ import java.util.Map;
 import java.util.TreeSet;
 
 public class ScummVMActivity extends Activity {
+	private static final String ADVENTURE_PAD_LOG_TAG = "AdventurePadBridge";
+	private static final String ADVENTURE_PAD_PACKAGE = "com.jamesmoran.adventurepad";
+	private static final String ADVENTURE_PAD_ACTIVITY = "com.jamesmoran.adventurepad.TrackpadActivity";
+	private static final String[] VIRTUAL_DISPLAY_NAME_MARKERS = {
+		"virtual", "overlay", "screen record", "screenrecord",
+		"screen share", "screenshare", "mirroring"
+	};
+
 	/* Establish whether the hover events are available */
 	private static boolean _hoverAvailable;
 
@@ -169,6 +181,7 @@ public class ScummVMActivity extends Activity {
 	// This avoids that when C++ terminates we call finish() a second time
 	// This second finish causes termination when we are launched again
 	boolean _finishing = false;
+	private boolean _adventurePadLaunchAttempted = false;
 
 	private final int[][] TextInputKeyboardList =
 	{
@@ -1092,6 +1105,7 @@ public class ScummVMActivity extends Activity {
 	@Override
 	public void onCreate(Bundle savedInstanceState) {
 //		Log.d(ScummVM.LOG_TAG, "onCreate: " + getIntent().getData());
+		Log.i(ADVENTURE_PAD_LOG_TAG, "ScummVMActivity onCreate entered");
 
 		super.onCreate(savedInstanceState);
 
@@ -1102,6 +1116,14 @@ public class ScummVMActivity extends Activity {
 		getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
 		setContentView(R.layout.scummvm_activity);
+		Log.i(ADVENTURE_PAD_LOG_TAG, "scheduling trackpad launch");
+		new Handler(Looper.getMainLooper()).post(new Runnable() {
+			@Override
+			public void run() {
+				Log.i(ADVENTURE_PAD_LOG_TAG, "trackpad launch runnable entered");
+				launchAdventurePadOnce();
+			}
+		});
 		_videoLayout = findViewById(R.id.video_layout);
 		_main_surface = findViewById(R.id.main_surface);
 		_buttonLayout = findViewById(R.id.button_layout);
@@ -1235,6 +1257,118 @@ public class ScummVMActivity extends Activity {
 
 		_scummvm_thread = new Thread(null, _scummvm, "ScummVM", 8388608); // 8MB
 		_scummvm_thread.start();
+		RelativeInputService.attachNativeEventSink(_scummvm);
+	}
+
+	private void launchAdventurePadOnce() {
+		if (_adventurePadLaunchAttempted)
+			return;
+		_adventurePadLaunchAttempted = true;
+
+		if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+			Log.w(ADVENTURE_PAD_LOG_TAG, "Secondary activity launch requires Android 10 or newer");
+			return;
+		}
+
+		DisplayManager displayManager = getSystemService(DisplayManager.class);
+		ActivityManager activityManager = getSystemService(ActivityManager.class);
+		if (displayManager == null || activityManager == null) {
+			Log.e(ADVENTURE_PAD_LOG_TAG, "DisplayManager or ActivityManager is unavailable");
+			return;
+		}
+
+		Display selectedDisplay = findEligibleSecondaryDisplay(displayManager);
+		if (selectedDisplay == null) {
+			Log.w(ADVENTURE_PAD_LOG_TAG, "No eligible non-default presentation display was found");
+			return;
+		}
+
+		Intent trackpadIntent = new Intent()
+			.setComponent(new ComponentName(ADVENTURE_PAD_PACKAGE, ADVENTURE_PAD_ACTIVITY))
+			.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+		boolean launchAllowed;
+		try {
+			launchAllowed = activityManager.isActivityStartAllowedOnDisplay(
+				this, selectedDisplay.getDisplayId(), trackpadIntent);
+		} catch (RuntimeException exception) {
+			Log.e(ADVENTURE_PAD_LOG_TAG, "Could not check launch eligibility for display " +
+				selectedDisplay.getDisplayId(), exception);
+			return;
+		}
+
+		Log.i(ADVENTURE_PAD_LOG_TAG, "isActivityStartAllowedOnDisplay result for display " +
+			selectedDisplay.getDisplayId() + ": " + launchAllowed);
+		if (!launchAllowed) {
+			Log.e(ADVENTURE_PAD_LOG_TAG, "Android denied TrackpadActivity launch on display " +
+				selectedDisplay.getDisplayId());
+			return;
+		}
+
+		try {
+			Bundle options = ActivityOptions.makeBasic()
+				.setLaunchDisplayId(selectedDisplay.getDisplayId())
+				.toBundle();
+			Log.i(ADVENTURE_PAD_LOG_TAG, "startActivity call attempted for display " +
+				selectedDisplay.getDisplayId());
+			startActivity(trackpadIntent, options);
+			Log.i(ADVENTURE_PAD_LOG_TAG, "startActivity returned successfully for display " +
+				selectedDisplay.getDisplayId());
+		} catch (RuntimeException exception) {
+			Log.e(ADVENTURE_PAD_LOG_TAG, "caught exception while launching TrackpadActivity on display " +
+				selectedDisplay.getDisplayId(), exception);
+		}
+	}
+
+	private Display findEligibleSecondaryDisplay(DisplayManager displayManager) {
+		Display[] discoveredDisplays = displayManager.getDisplays();
+		Log.i(ADVENTURE_PAD_LOG_TAG, "number of displays discovered: " + discoveredDisplays.length);
+
+		HashSet<Integer> presentationDisplayIds = new HashSet<>();
+		for (Display display : displayManager.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION))
+			presentationDisplayIds.add(display.getDisplayId());
+
+		for (Display candidate : discoveredDisplays) {
+			Log.i(ADVENTURE_PAD_LOG_TAG, "Display " + candidate.getDisplayId() +
+				": name=" + candidate.getName() + ", flags=" + candidate.getFlags() +
+				", state=" + candidate.getState());
+			String rejectionReason = getSecondaryDisplayRejectionReason(candidate, presentationDisplayIds);
+			if (rejectionReason == null) {
+				Log.i(ADVENTURE_PAD_LOG_TAG, "Selected secondary display " +
+					candidate.getDisplayId() + " (" + candidate.getName() + ")");
+				return candidate;
+			}
+			Log.i(ADVENTURE_PAD_LOG_TAG, "Rejected display " + candidate.getDisplayId() +
+				": " + rejectionReason);
+		}
+		return null;
+	}
+
+	private String getSecondaryDisplayRejectionReason(Display candidate, HashSet<Integer> presentationDisplayIds) {
+		if (candidate.getDisplayId() == Display.DEFAULT_DISPLAY)
+			return "default display";
+		if (!presentationDisplayIds.contains(candidate.getDisplayId()))
+			return "not in the presentation display category";
+		if (!candidate.isValid())
+			return "display is not valid";
+		if ((candidate.getFlags() & Display.FLAG_PRESENTATION) == 0)
+			return "FLAG_PRESENTATION is absent";
+		if ((candidate.getFlags() & Display.FLAG_PRIVATE) != 0)
+			return "display is private";
+		if (candidate.getState() == Display.STATE_OFF)
+			return "display state is OFF";
+		if (candidate.getState() == Display.STATE_UNKNOWN)
+			return "display state is UNKNOWN";
+
+		String normalizedName = candidate.getName().toLowerCase(Locale.ROOT);
+		for (String marker : VIRTUAL_DISPLAY_NAME_MARKERS) {
+			if (normalizedName.contains(marker))
+				return "display name looks virtual because it contains '" + marker + "'";
+		}
+
+		Display.Mode mode = candidate.getMode();
+		if (mode.getPhysicalWidth() <= 0 || mode.getPhysicalHeight() <= 0)
+			return "display mode has invalid physical dimensions";
+		return null;
 	}
 
 	@Override
@@ -1351,6 +1485,7 @@ public class ScummVMActivity extends Activity {
 	public void onDestroy() {
 //		Log.d(ScummVM.LOG_TAG, "onDestroy");
 
+		RelativeInputService.detachNativeEventSink(_scummvm);
 		super.onDestroy();
 
 		SAFFSTree.setIOBusyListener(null);

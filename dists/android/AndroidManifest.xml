@@ -7,6 +7,10 @@
 	android:sharedUserMaxSdkVersion="32"
 	tools:targetApi="tiramisu">
 
+	<permission
+		android:name="org.scummvm.scummvm.permission.RELATIVE_INPUT"
+		android:protectionLevel="signature" />
+
 	<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 	<uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
 	<uses-permission android:name="android.permission.INTERNET" />
@@ -17,6 +21,11 @@
 	<uses-permission
 		android:name="android.permission.WRITE_EXTERNAL_STORAGE"
 		tools:ignore="ScopedStorage" />
+	<uses-permission android:name="com.jamesmoran.adventurepad.permission.LAUNCH_TRACKPAD" />
+
+	<queries>
+		<package android:name="com.jamesmoran.adventurepad" />
+	</queries>
 
 	<uses-feature
 		android:name="android.hardware.audio.low_latency"
@@ -95,6 +104,10 @@
 				<category android:name="android.intent.category.DEFAULT" />
 			</intent-filter>
 		</activity>
+		<service
+			android:name=".RelativeInputService"
+			android:exported="true"
+			android:permission="org.scummvm.scummvm.permission.RELATIVE_INPUT" />
 	</application>
 
 </manifest>
