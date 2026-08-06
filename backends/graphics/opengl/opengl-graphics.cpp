@@ -72,6 +72,42 @@
 
 namespace OpenGL {
 
+namespace {
+
+struct PresentationColor {
+	GLfloat red;
+	GLfloat green;
+	GLfloat blue;
+};
+
+struct PresentationStyle {
+	PresentationColor surround;
+	PresentationColor vignette;
+	PresentationColor frameShadow;
+	PresentationColor bevelTop;
+	PresentationColor bevelBottom;
+	PresentationColor bevelLeft;
+	PresentationColor bevelRight;
+	int vignetteSize;
+	int frameWidth;
+	int bevelWidth;
+};
+
+const PresentationStyle kDefaultPresentationStyle = {
+	{ 0.055f, 0.067f, 0.082f },
+	{ 0.035f, 0.043f, 0.053f },
+	{ 0.025f, 0.031f, 0.039f },
+	{ 0.16f, 0.19f, 0.22f },
+	{ 0.075f, 0.09f, 0.11f },
+	{ 0.12f, 0.145f, 0.17f },
+	{ 0.06f, 0.073f, 0.09f },
+	8,
+	6,
+	2
+};
+
+} // End of anonymous namespace
+
 OpenGLGraphicsManager::OpenGLGraphicsManager()
 	: _currentState(), _oldState(), _transactionMode(kTransactionNone), _screenChangeID(1 << (sizeof(int) * 8 - 2)),
 	  _pipeline(nullptr), _stretchMode(STRETCH_FIT),
@@ -725,6 +761,85 @@ void OpenGLGraphicsManager::renderCursor() {
 						   _cursorWidthScaled, _cursorHeightScaled);
 }
 
+void OpenGLGraphicsManager::clearPresentationRect(const Common::Rect &rect, GLfloat r, GLfloat g, GLfloat b) {
+	const Common::Rect displayRect(0, 0, _windowWidth, _windowHeight);
+	const Common::Rect gameRect = _gameDrawRect.findIntersectingRect(displayRect);
+	const Common::Rect presentationAreas[] = {
+		Common::Rect(0, 0, _windowWidth, gameRect.top),
+		Common::Rect(0, gameRect.bottom, _windowWidth, _windowHeight),
+		Common::Rect(0, gameRect.top, gameRect.left, gameRect.bottom),
+		Common::Rect(gameRect.right, gameRect.top, _windowWidth, gameRect.bottom)
+	};
+
+	_targetBuffer->setClearColor(r, g, b, 1.0f);
+	for (uint i = 0; i < ARRAYSIZE(presentationAreas); ++i) {
+		Common::Rect clippedRect = rect.findIntersectingRect(presentationAreas[i]);
+		if (clippedRect.isEmpty())
+			continue;
+
+		_targetBuffer->setScissorBox(clippedRect.left, _windowHeight - clippedRect.bottom,
+				clippedRect.width(), clippedRect.height());
+		GL_CALL(glClear(GL_COLOR_BUFFER_BIT));
+	}
+}
+
+void OpenGLGraphicsManager::renderPresentationLayer() {
+	if (_windowWidth <= 0 || _windowHeight <= 0)
+		return;
+
+	const Common::Rect displayRect(0, 0, _windowWidth, _windowHeight);
+	const Common::Rect gameRect = _gameDrawRect.findIntersectingRect(displayRect);
+	if (gameRect == displayRect)
+		return;
+
+	_targetBuffer->enableScissorTest(true);
+	const PresentationStyle &style = kDefaultPresentationStyle;
+
+	// A restrained, texture-free slate surround. Every primitive is clipped
+	// against the complement of the game rectangle by clearPresentationRect().
+	clearPresentationRect(displayRect, style.surround.red, style.surround.green, style.surround.blue);
+
+	// A soft edge vignette gives the otherwise flat surround some depth.
+	clearPresentationRect(Common::Rect(0, 0, _windowWidth, style.vignetteSize),
+			style.vignette.red, style.vignette.green, style.vignette.blue);
+	clearPresentationRect(Common::Rect(0, _windowHeight - style.vignetteSize, _windowWidth, _windowHeight),
+			style.vignette.red, style.vignette.green, style.vignette.blue);
+	clearPresentationRect(Common::Rect(0, 0, style.vignetteSize, _windowHeight),
+			style.vignette.red, style.vignette.green, style.vignette.blue);
+	clearPresentationRect(Common::Rect(_windowWidth - style.vignetteSize, 0, _windowWidth, _windowHeight),
+			style.vignette.red, style.vignette.green, style.vignette.blue);
+
+	// Stepped, low-contrast bands form a subtle industrial bevel around the
+	// display without touching its pixels.
+	clearPresentationRect(Common::Rect(gameRect.left - style.frameWidth, gameRect.top - style.frameWidth,
+			gameRect.right + style.frameWidth, gameRect.top), style.frameShadow.red, style.frameShadow.green, style.frameShadow.blue);
+	clearPresentationRect(Common::Rect(gameRect.left - style.frameWidth, gameRect.bottom,
+			gameRect.right + style.frameWidth, gameRect.bottom + style.frameWidth), style.frameShadow.red, style.frameShadow.green, style.frameShadow.blue);
+	clearPresentationRect(Common::Rect(gameRect.left - style.frameWidth, gameRect.top,
+			gameRect.left, gameRect.bottom), style.frameShadow.red, style.frameShadow.green, style.frameShadow.blue);
+	clearPresentationRect(Common::Rect(gameRect.right, gameRect.top,
+			gameRect.right + style.frameWidth, gameRect.bottom), style.frameShadow.red, style.frameShadow.green, style.frameShadow.blue);
+
+	clearPresentationRect(Common::Rect(gameRect.left - style.bevelWidth, gameRect.top - style.bevelWidth,
+			gameRect.right + style.bevelWidth, gameRect.top), style.bevelTop.red, style.bevelTop.green, style.bevelTop.blue);
+	clearPresentationRect(Common::Rect(gameRect.left - style.bevelWidth, gameRect.bottom,
+			gameRect.right + style.bevelWidth, gameRect.bottom + style.bevelWidth), style.bevelBottom.red, style.bevelBottom.green, style.bevelBottom.blue);
+	clearPresentationRect(Common::Rect(gameRect.left - style.bevelWidth, gameRect.top,
+			gameRect.left, gameRect.bottom), style.bevelLeft.red, style.bevelLeft.green, style.bevelLeft.blue);
+	clearPresentationRect(Common::Rect(gameRect.right, gameRect.top,
+			gameRect.right + style.bevelWidth, gameRect.bottom), style.bevelRight.red, style.bevelRight.green, style.bevelRight.blue);
+
+	// Restore the renderer's established clear state and leave scissoring off;
+	// the normal game/cursor path enables its clipping immediately after. The
+	// decoration clears above overwrite the framebuffer object's stored scissor
+	// rectangle, so restore the game rectangle before that enable occurs.
+	_targetBuffer->setClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+	_targetBuffer->setScissorBox(_gameDrawRect.left,
+			_windowHeight - _gameDrawRect.height() - _gameDrawRect.top,
+			_gameDrawRect.width(), _gameDrawRect.height());
+	_targetBuffer->enableScissorTest(false);
+}
+
 void OpenGLGraphicsManager::updateScreen() {
 	if ((!_gameScreen
 #if defined(USE_OPENGL_GAME) || defined(USE_OPENGL_SHADERS)
@@ -802,6 +917,9 @@ void OpenGLGraphicsManager::updateScreen() {
 	{
 		GL_CALL(glClear(GL_COLOR_BUFFER_BIT));
 	}
+
+	// Presentation is composed after the background and before game pixels.
+	renderPresentationLayer();
 
 	if (!_overlayVisible) {
 		// The scissor test is enabled to:

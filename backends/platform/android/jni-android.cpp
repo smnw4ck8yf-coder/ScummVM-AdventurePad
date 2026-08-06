@@ -38,6 +38,7 @@
 #define FORBIDDEN_SYMBOL_EXCEPTION_printf
 
 #include <android/bitmap.h>
+#include <time.h>
 
 #include "backends/platform/android/android.h"
 #include "backends/platform/android/jni-android.h"
@@ -65,6 +66,11 @@ jobject JNI::_jobj = 0;
 jobject JNI::_jobj_egl = 0;
 jobject JNI::_jobj_egl_display = 0;
 jobject JNI::_jobj_egl_surface = 0;
+bool JNI::_have_mirror_surface = false;
+int JNI::_mirror_surface_width = 0;
+int JNI::_mirror_surface_height = 0;
+int64 JNI::_mirror_surface_generation = 0;
+int JNI::_mirror_diagnostic_frames_remaining = 0;
 int JNI::_egl_version = 0;
 
 Common::Archive *JNI::_asset_archive = 0;
@@ -106,6 +112,12 @@ jmethodID JNI::_MID_getSysArchives = 0;
 jmethodID JNI::_MID_getAllStorageLocations = 0;
 jmethodID JNI::_MID_initSurface = 0;
 jmethodID JNI::_MID_deinitSurface = 0;
+jmethodID JNI::_MID_updateMirrorSurface = 0;
+jmethodID JNI::_MID_makeMirrorSurfaceCurrent = 0;
+jmethodID JNI::_MID_makePrimarySurfaceCurrent = 0;
+jmethodID JNI::_MID_swapMirrorSurface = 0;
+jmethodID JNI::_MID_reportMirrorStatus = 0;
+jmethodID JNI::_MID_failMirrorSurface = 0;
 jmethodID JNI::_MID_eglVersion = 0;
 jmethodID JNI::_MID_getNewSAFTree = 0;
 jmethodID JNI::_MID_getSAFTrees = 0;
@@ -114,6 +126,7 @@ jmethodID JNI::_MID_exportBackup = 0;
 jmethodID JNI::_MID_importBackup = 0;
 
 jmethodID JNI::_MID_EGL10_eglSwapBuffers = 0;
+jmethodID JNI::_MID_EGL10_eglGetError = 0;
 
 const JNINativeMethod JNI::_natives[] = {
 	{ "create", "(Landroid/content/res/AssetManager;"
@@ -677,6 +690,119 @@ void JNI::deinitSurface() {
 	}
 }
 
+void JNI::updateMirrorSurface() {
+	JNIEnv *env = JNI::getEnv();
+	jlongArray update = (jlongArray)env->CallObjectMethod(_jobj, _MID_updateMirrorSurface);
+	if (env->ExceptionCheck()) {
+		LOGE("updateMirrorSurface failed");
+		env->ExceptionDescribe();
+		env->ExceptionClear();
+		return;
+	}
+	if (!update)
+		return;
+
+	jlong values[4] = { 0, 0, 0, 0 };
+	if (env->GetArrayLength(update) == ARRAYSIZE(values))
+		env->GetLongArrayRegion(update, 0, ARRAYSIZE(values), values);
+	env->DeleteLocalRef(update);
+
+	const int64 previousGeneration = _mirror_surface_generation;
+	_have_mirror_surface = values[0] == 1;
+	_mirror_surface_generation = values[1];
+	_mirror_surface_width = _have_mirror_surface ? values[2] : 0;
+	_mirror_surface_height = _have_mirror_surface ? values[3] : 0;
+	if (_have_mirror_surface && previousGeneration != _mirror_surface_generation)
+		_mirror_diagnostic_frames_remaining = 8;
+}
+
+bool JNI::swapBuffers() {
+	JNIEnv *env = JNI::getEnv();
+	struct timespec started;
+	struct timespec finished;
+	clock_gettime(CLOCK_MONOTONIC, &started);
+	const bool result = env->CallBooleanMethod(_jobj_egl, _MID_EGL10_eglSwapBuffers,
+			_jobj_egl_display, _jobj_egl_surface);
+	clock_gettime(CLOCK_MONOTONIC, &finished);
+	if (env->ExceptionCheck()) {
+		env->ExceptionDescribe();
+		env->ExceptionClear();
+		return false;
+	}
+	if (_mirror_diagnostic_frames_remaining > 0) {
+		const int error = env->CallIntMethod(_jobj_egl, _MID_EGL10_eglGetError);
+		const int64 durationMicros = (finished.tv_sec - started.tv_sec) * 1000000LL +
+				(finished.tv_nsec - started.tv_nsec) / 1000LL;
+		LOGI("AdventurePadMirror primary swap result=%d durationUs=%lld eglError=0x%x surface=%p",
+				result, (long long)durationMicros, error, _jobj_egl_surface);
+		--_mirror_diagnostic_frames_remaining;
+		return result && error == 0x3000;
+	}
+	return result;
+}
+
+bool JNI::makeMirrorSurfaceCurrent() {
+	JNIEnv *env = JNI::getEnv();
+	const bool result = env->CallBooleanMethod(_jobj, _MID_makeMirrorSurfaceCurrent);
+	if (env->ExceptionCheck()) {
+		env->ExceptionDescribe();
+		env->ExceptionClear();
+		return false;
+	}
+	return result;
+}
+
+bool JNI::makePrimarySurfaceCurrent() {
+	JNIEnv *env = JNI::getEnv();
+	const bool result = env->CallBooleanMethod(_jobj, _MID_makePrimarySurfaceCurrent);
+	if (env->ExceptionCheck()) {
+		env->ExceptionDescribe();
+		env->ExceptionClear();
+		return false;
+	}
+	return result;
+}
+
+bool JNI::swapMirrorSurface() {
+	JNIEnv *env = JNI::getEnv();
+	const bool result = env->CallBooleanMethod(_jobj, _MID_swapMirrorSurface);
+	if (env->ExceptionCheck()) {
+		env->ExceptionDescribe();
+		env->ExceptionClear();
+		return false;
+	}
+	return result;
+}
+
+void JNI::reportMirrorStatus(int status, const char *diagnostic) {
+	JNIEnv *env = JNI::getEnv();
+	jstring javaDiagnostic = env->NewStringUTF(diagnostic);
+	env->CallVoidMethod(_jobj, _MID_reportMirrorStatus, status,
+			(jlong)_mirror_surface_generation, javaDiagnostic);
+	env->DeleteLocalRef(javaDiagnostic);
+	if (env->ExceptionCheck()) {
+		env->ExceptionDescribe();
+		env->ExceptionClear();
+	}
+}
+
+bool JNI::failMirrorSurface(const char *diagnostic) {
+	JNIEnv *env = JNI::getEnv();
+	jstring javaDiagnostic = env->NewStringUTF(diagnostic);
+	const bool primaryRestored = env->CallBooleanMethod(_jobj, _MID_failMirrorSurface,
+			(jlong)_mirror_surface_generation, javaDiagnostic);
+	env->DeleteLocalRef(javaDiagnostic);
+	if (env->ExceptionCheck()) {
+		env->ExceptionDescribe();
+		env->ExceptionClear();
+		return false;
+	}
+	_have_mirror_surface = false;
+	_mirror_surface_width = 0;
+	_mirror_surface_height = 0;
+	return primaryRestored;
+}
+
 int JNI::fetchEGLVersion() {
 	JNIEnv *env = JNI::getEnv();
 
@@ -743,6 +869,12 @@ void JNI::create(JNIEnv *env, jobject self, jobject asset_manager,
 	FIND_METHOD(, getAllStorageLocations, "()[Ljava/lang/String;");
 	FIND_METHOD(, initSurface, "()Ljavax/microedition/khronos/egl/EGLSurface;");
 	FIND_METHOD(, deinitSurface, "()V");
+	FIND_METHOD(, updateMirrorSurface, "()[J");
+	FIND_METHOD(, makeMirrorSurfaceCurrent, "()Z");
+	FIND_METHOD(, makePrimarySurfaceCurrent, "()Z");
+	FIND_METHOD(, swapMirrorSurface, "()Z");
+	FIND_METHOD(, reportMirrorStatus, "(IJLjava/lang/String;)V");
+	FIND_METHOD(, failMirrorSurface, "(JLjava/lang/String;)Z");
 	FIND_METHOD(, eglVersion, "()I");
 	FIND_METHOD(, getNewSAFTree,
 	            "(ZLjava/lang/String;Ljava/lang/String;)Lorg/scummvm/scummvm/SAFFSTree;");
@@ -762,6 +894,7 @@ void JNI::create(JNIEnv *env, jobject self, jobject asset_manager,
 	FIND_METHOD(EGL10_, eglSwapBuffers,
 				"(Ljavax/microedition/khronos/egl/EGLDisplay;"
 				"Ljavax/microedition/khronos/egl/EGLSurface;)Z");
+	FIND_METHOD(EGL10_, eglGetError, "()I");
 
 	env->DeleteLocalRef(cls);
 #undef FIND_METHOD
@@ -789,6 +922,12 @@ void JNI::create(JNIEnv *env, jobject self, jobject asset_manager,
 }
 
 void JNI::destroy(JNIEnv *env, jobject self) {
+	_have_mirror_surface = false;
+	_mirror_surface_width = 0;
+	_mirror_surface_height = 0;
+	_mirror_surface_generation = 0;
+	_mirror_diagnostic_frames_remaining = 0;
+
 	delete _asset_archive;
 	_asset_archive = 0;
 

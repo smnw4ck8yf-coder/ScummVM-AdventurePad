@@ -103,7 +103,17 @@ public:
 	static void notifyHTTPService(int localPort, bool minimal);
 
 	static inline bool haveSurface();
-	static inline bool swapBuffers();
+	static bool swapBuffers();
+	static void updateMirrorSurface();
+	static bool haveMirrorSurface() { return _have_mirror_surface; }
+	static bool makeMirrorSurfaceCurrent();
+	static bool makePrimarySurfaceCurrent();
+	static bool swapMirrorSurface();
+	static void reportMirrorStatus(int status, const char *diagnostic);
+	static bool failMirrorSurface(const char *diagnostic);
+	static int mirrorSurfaceWidth() { return _mirror_surface_width; }
+	static int mirrorSurfaceHeight() { return _mirror_surface_height; }
+	static int64 mirrorSurfaceGeneration() { return _mirror_surface_generation; }
 	static bool initSurface();
 	static void deinitSurface();
 	static int eglVersion() {
@@ -131,6 +141,11 @@ private:
 	static jobject _jobj_egl;
 	static jobject _jobj_egl_display;
 	static jobject _jobj_egl_surface;
+	static bool _have_mirror_surface;
+	static int _mirror_surface_width;
+	static int _mirror_surface_height;
+	static int64 _mirror_surface_generation;
+	static int _mirror_diagnostic_frames_remaining;
 	// cached EGL version
 	static int _egl_version;
 
@@ -161,6 +176,12 @@ private:
 	static jmethodID _MID_getAllStorageLocations;
 	static jmethodID _MID_initSurface;
 	static jmethodID _MID_deinitSurface;
+	static jmethodID _MID_updateMirrorSurface;
+	static jmethodID _MID_makeMirrorSurfaceCurrent;
+	static jmethodID _MID_makePrimarySurfaceCurrent;
+	static jmethodID _MID_swapMirrorSurface;
+	static jmethodID _MID_reportMirrorStatus;
+	static jmethodID _MID_failMirrorSurface;
 	static jmethodID _MID_eglVersion;
 	static jmethodID _MID_getNewSAFTree;
 	static jmethodID _MID_getSAFTrees;
@@ -169,6 +190,7 @@ private:
 	static jmethodID _MID_importBackup;
 
 	static jmethodID _MID_EGL10_eglSwapBuffers;
+	static jmethodID _MID_EGL10_eglGetError;
 
 	static const JNINativeMethod _natives[];
 
@@ -206,13 +228,6 @@ private:
 
 inline bool JNI::haveSurface() {
 	return _jobj_egl_surface != 0;
-}
-
-inline bool JNI::swapBuffers() {
-	JNIEnv *env = JNI::getEnv();
-
-	return env->CallBooleanMethod(_jobj_egl, _MID_EGL10_eglSwapBuffers,
-									_jobj_egl_display, _jobj_egl_surface);
 }
 
 #endif

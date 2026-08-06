@@ -306,6 +306,8 @@ private:
 	//
 	// OpenGL utilities
 	//
+	void renderPresentationLayer();
+	void clearPresentationRect(const Common::Rect &rect, GLfloat r, GLfloat g, GLfloat b);
 
 	/**
 	 * Initialize the active context for use.

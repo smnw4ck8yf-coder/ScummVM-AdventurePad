@@ -40,16 +40,62 @@
 #include "backends/platform/android/jni-android.h"
 #include "backends/graphics/android/android-graphics.h"
 #include "backends/graphics/opengl/pipelines/pipeline.h"
+#include "backends/graphics/opengl/renderer3d.h"
 #include "backends/graphics/opengl/texture.h"
 
 #include "graphics/blit.h"
 #include "graphics/managed_surface.h"
+#include "graphics/opengl/debug.h"
+
+namespace {
+
+void logMirrorGLState(const char *stage) {
+	GLint framebuffer = 0;
+	GLint viewport[4] = { 0, 0, 0, 0 };
+	GLint scissorBox[4] = { 0, 0, 0, 0 };
+	GLint program = 0;
+	GLint activeTexture = 0;
+	GLint texture = 0;
+	GLboolean scissor = GL_FALSE;
+	GLboolean blend = GL_FALSE;
+	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &framebuffer);
+	glGetIntegerv(GL_VIEWPORT, viewport);
+	glGetBooleanv(GL_SCISSOR_TEST, &scissor);
+	glGetIntegerv(GL_SCISSOR_BOX, scissorBox);
+	glGetBooleanv(GL_BLEND, &blend);
+	glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+	glGetIntegerv(GL_ACTIVE_TEXTURE, &activeTexture);
+	glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture);
+	const GLenum error = glGetError();
+	LOGI("AdventurePadMirror GL %s framebuffer=%d viewport=%d,%d %dx%d scissor=%d box=%d,%d %dx%d blend=%d program=%d activeTexture=0x%x texture=%d glError=0x%x",
+			stage, framebuffer, viewport[0], viewport[1], viewport[2], viewport[3],
+			scissor, scissorBox[0], scissorBox[1], scissorBox[2], scissorBox[3],
+			blend, program, activeTexture, texture, error);
+}
+
+void logMirrorProjectionState(const char *stage, const OpenGL::Framebuffer &target,
+		int width, int height, bool activatedAfterSurfaceSwitch) {
+	const float *projection = target.getProjectionMatrix().getData();
+	LOGI("AdventurePadMirror target %s size=%dx%d projection=[%.7f %.7f %.7f %.7f | %.7f %.7f %.7f %.7f | %.7f %.7f %.7f %.7f | %.7f %.7f %.7f %.7f] model=none projectionUniformAppliedOnActivate=%d",
+			stage, width, height,
+			projection[0], projection[1], projection[2], projection[3],
+			projection[4], projection[5], projection[6], projection[7],
+			projection[8], projection[9], projection[10], projection[11],
+			projection[12], projection[13], projection[14], projection[15],
+			activatedAfterSurfaceSwitch);
+}
+
+} // End of anonymous namespace
 
 //
 // AndroidGraphicsManager
 //
 AndroidGraphicsManager::AndroidGraphicsManager() :
 	_touchcontrols(nullptr),
+	_mirrorTarget(),
+	_mirrorGeneration(0),
+	_mirrorSourceState(-1),
+	_mirrorDiagnosticFramesRemaining(0),
 	_old_touch_mode(OSystem_Android::TOUCH_MODE_TOUCHPAD) {
 	ENTER();
 
@@ -150,10 +196,183 @@ void AndroidGraphicsManager::updateScreen() {
 	if (!JNI::haveSurface())
 		return;
 
+	// Attach and detach requests arrive on Android's main thread, but EGL
+	// lifecycle work is consumed here on ScummVM's render thread.
+	JNI::updateMirrorSurface();
+
 	// Sets _forceRedraw if needed
 	dynamic_cast<OSystem_Android *>(g_system)->getTouchControls().beforeDraw();
 
 	OpenGLGraphicsManager::updateScreen();
+	renderMirrorSurface();
+}
+
+void AndroidGraphicsManager::renderMirrorSurface() {
+	if (!JNI::haveMirrorSurface()) {
+		_mirrorGeneration = 0;
+		_mirrorSourceState = -1;
+		return;
+	}
+
+	const int64 generation = JNI::mirrorSurfaceGeneration();
+	if (_mirrorGeneration != generation) {
+		_mirrorGeneration = generation;
+		_mirrorSourceState = -1;
+		_mirrorDiagnosticFramesRemaining = 8;
+	}
+
+	const OpenGL::Texture *sourceTexture = nullptr;
+	if (_gameScreen) {
+		sourceTexture = &_gameScreen->getGLTexture();
+	}
+#if defined(USE_OPENGL_GAME) || defined(USE_OPENGL_SHADERS)
+	else if (_renderer3d && _renderer3d->hasTexture()) {
+		sourceTexture = &_renderer3d->getGLTexture();
+	}
+#endif
+
+	if (!sourceTexture || sourceTexture->getLogicalWidth() == 0 || sourceTexture->getLogicalHeight() < 4) {
+		if (_mirrorSourceState != 0) {
+			JNI::reportMirrorStatus(2, "Current renderer has no reusable game texture");
+			_mirrorSourceState = 0;
+		}
+		return;
+	}
+	if (_mirrorDiagnosticFramesRemaining > 0) {
+		const char *sourceType = _gameScreen ? "gameScreen" : "renderer3d";
+		const bool textureValid = glIsTexture(sourceTexture->getGLTexture()) == GL_TRUE;
+		const bool uploadComplete = !_gameScreen || !_gameScreen->isDirty();
+		const GLenum textureError = glGetError();
+		LOGI("AdventurePadMirror source=%s logical=%ux%u allocated=%ux%u id=%u valid=%d dirty=%d gpuDataReady=%d linearFilter=%d glError=0x%x",
+				sourceType, sourceTexture->getLogicalWidth(), sourceTexture->getLogicalHeight(),
+				sourceTexture->getWidth(), sourceTexture->getHeight(), sourceTexture->getGLTexture(),
+				textureValid, _gameScreen ? _gameScreen->isDirty() : 0,
+				textureValid && uploadComplete, sourceTexture->isLinearFilteringEnabled(), textureError);
+		logMirrorGLState("primary-before-switch");
+		if (!textureValid || !uploadComplete || textureError != GL_NO_ERROR) {
+			JNI::failMirrorSurface("Reusable source texture is not valid in the primary context");
+			return;
+		}
+	}
+
+	const int surfaceWidth = JNI::mirrorSurfaceWidth();
+	const int surfaceHeight = JNI::mirrorSurfaceHeight();
+	if (surfaceWidth <= 0 || surfaceHeight <= 0) {
+		JNI::failMirrorSurface("Mirror surface dimensions became invalid");
+		return;
+	}
+
+#if defined(USE_OPENGL_GAME) || defined(USE_OPENGL_SHADERS)
+	const bool restore3D = _renderer3d != nullptr;
+	if (restore3D)
+		_renderer3d->leave3D();
+#endif
+
+	OpenGL::Pipeline *pipeline = getPipeline();
+	if (!pipeline) {
+#if defined(USE_OPENGL_GAME) || defined(USE_OPENGL_SHADERS)
+		if (restore3D)
+			_renderer3d->enter3D();
+#endif
+		JNI::failMirrorSurface("OpenGL pipeline is unavailable");
+		return;
+	}
+	GLint primaryViewport[4] = { 0, 0, 0, 0 };
+	if (_mirrorDiagnosticFramesRemaining > 0)
+		glGetIntegerv(GL_VIEWPORT, primaryViewport);
+	OpenGL::Pipeline::disable();
+	OpenGL::Framebuffer *primaryTarget = pipeline->setFramebuffer(&_mirrorTarget);
+	if (_mirrorDiagnosticFramesRemaining > 0)
+		logMirrorProjectionState("primary-before-switch", *primaryTarget,
+				primaryViewport[2], primaryViewport[3], false);
+	_mirrorTarget.setSize(surfaceWidth, surfaceHeight);
+
+	if (!JNI::makeMirrorSurfaceCurrent()) {
+		const bool primaryRestored = JNI::failMirrorSurface("Could not make the mirror EGLSurface current");
+		pipeline->setFramebuffer(primaryTarget);
+		if (primaryRestored)
+			pipeline->activate();
+#if defined(USE_OPENGL_GAME) || defined(USE_OPENGL_SHADERS)
+		if (restore3D && primaryRestored)
+			_renderer3d->enter3D();
+#endif
+		return;
+	}
+
+	pipeline->activate();
+	if (_mirrorDiagnosticFramesRemaining > 0)
+		logMirrorProjectionState("mirror-active", _mirrorTarget, surfaceWidth, surfaceHeight, true);
+	_mirrorTarget.setClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+	_mirrorTarget.enableScissorTest(false);
+	_mirrorTarget.enableBlend(OpenGL::Framebuffer::kBlendModeOpaque);
+	pipeline->setColor(1.0f, 1.0f, 1.0f, 1.0f);
+	if (_mirrorDiagnosticFramesRemaining > 0)
+		logMirrorGLState("mirror-before-clear");
+	GL_CALL(glClear(GL_COLOR_BUFFER_BIT));
+
+	const int sourceWidth = sourceTexture->getLogicalWidth();
+	const int sourceHeight = sourceTexture->getLogicalHeight();
+	int destinationWidth = surfaceWidth;
+	int destinationHeight = (int)((int64)surfaceWidth * sourceHeight / sourceWidth);
+	if (destinationHeight > surfaceHeight) {
+		destinationHeight = surfaceHeight;
+		destinationWidth = (int)((int64)surfaceHeight * sourceWidth / sourceHeight);
+	}
+	const int destinationX = (surfaceWidth - destinationWidth) / 2;
+	const int destinationY = (surfaceHeight - destinationHeight) / 2;
+	const GLenum beforeDrawError = glGetError();
+	// Use the exact full-texture overload used by the successful upper draw.
+	// This preserves the texture object's canonical flip/rotation coordinates.
+	pipeline->drawTexture(*sourceTexture, destinationX, destinationY,
+			destinationWidth, destinationHeight);
+	const GLenum drawError = glGetError();
+	if (_mirrorDiagnosticFramesRemaining > 0) {
+		LOGI("AdventurePadMirror draw source=0,0-%d,%d destinationVertices=[%d,%d %d,%d %d,%d %d,%d] surface=%dx%d glErrorBefore=0x%x glErrorAfter=0x%x",
+				sourceWidth, sourceHeight, destinationX, destinationY,
+				destinationX + destinationWidth, destinationY,
+				destinationX, destinationY + destinationHeight,
+				destinationX + destinationWidth, destinationY + destinationHeight,
+				surfaceWidth, surfaceHeight,
+				beforeDrawError, drawError);
+		logMirrorGLState("mirror-after-draw");
+	}
+
+	const bool swapped = beforeDrawError == GL_NO_ERROR && drawError == GL_NO_ERROR && JNI::swapMirrorSurface();
+	OpenGL::Pipeline::disable();
+	bool primaryRestored = JNI::makePrimarySurfaceCurrent();
+	if (!primaryRestored) {
+		primaryRestored = JNI::failMirrorSurface("Could not restore the primary EGLSurface");
+	} else if (!swapped) {
+		primaryRestored = JNI::failMirrorSurface(beforeDrawError == GL_NO_ERROR && drawError == GL_NO_ERROR ?
+				"Mirror buffer swap failed" : "Mirror draw produced a GL error");
+	}
+	pipeline->setFramebuffer(primaryTarget);
+	if (primaryRestored)
+		pipeline->activate();
+
+#if defined(USE_OPENGL_GAME) || defined(USE_OPENGL_SHADERS)
+	if (restore3D && primaryRestored)
+		_renderer3d->enter3D();
+#endif
+	if (_mirrorDiagnosticFramesRemaining > 0) {
+		if (primaryRestored) {
+			logMirrorProjectionState("primary-restored", *primaryTarget,
+					primaryViewport[2], primaryViewport[3], true);
+			logMirrorGLState("primary-restored");
+		}
+		LOGI("AdventurePadMirror primary restoration verified=%d", primaryRestored);
+		--_mirrorDiagnosticFramesRemaining;
+	}
+
+	if (!swapped || !primaryRestored) {
+		_mirrorSourceState = -1;
+		return;
+	}
+
+	if (_mirrorSourceState != 1) {
+		JNI::reportMirrorStatus(1, "Live full-frame texture mirror supported");
+		_mirrorSourceState = 1;
+	}
 }
 
 void AndroidGraphicsManager::displayMessageOnOSD(const Common::U32String &msg) {

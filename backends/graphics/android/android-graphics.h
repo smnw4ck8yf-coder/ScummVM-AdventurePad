@@ -68,7 +68,13 @@ protected:
 	void refreshScreen() override;
 
 private:
+	void renderMirrorSurface();
+
 	OpenGL::Surface *_touchcontrols;
+	OpenGL::Backbuffer _mirrorTarget;
+	int64 _mirrorGeneration;
+	int _mirrorSourceState;
+	int _mirrorDiagnosticFramesRemaining;
 	int _old_touch_mode;
 	bool _rendering3d;
 };

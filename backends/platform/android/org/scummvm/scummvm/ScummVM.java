@@ -24,6 +24,8 @@ package org.scummvm.scummvm;
 import android.content.res.AssetManager;
 import android.graphics.PixelFormat;
 import android.util.Log;
+import android.os.Messenger;
+import android.view.Surface;
 import android.view.SurfaceHolder;
 
 import androidx.annotation.Keep;
@@ -55,6 +57,16 @@ public abstract class ScummVM implements SurfaceHolder.Callback,
 	private EGLConfig _egl_config;
 	private EGLContext _egl_context = EGL10.EGL_NO_CONTEXT;
 	private EGLSurface _egl_surface = EGL10.EGL_NO_SURFACE;
+	private EGLSurface _egl_mirror_surface = EGL10.EGL_NO_SURFACE;
+	private final Object _mirror_surface_lock = new Object();
+	private MirrorSurfaceRequest _pending_mirror_request;
+	private long _mirror_surface_generation;
+	private int _mirror_surface_width;
+	private int _mirror_surface_height;
+	private Messenger _mirror_status_recipient;
+	private int _mirror_diagnostic_frames_remaining;
+	private int _mirror_slow_swap_logs_remaining;
+	private volatile boolean _mirror_disabled_for_session;
 
 	private SurfaceHolder _surface_holder;
 	private int bitsPerPixel;
@@ -153,6 +165,26 @@ public abstract class ScummVM implements SurfaceHolder.Callback,
 
 	final public String getInstallingScummVMVersionInfo() {
 		return getNativeVersionInfo();
+	}
+
+	final void queueMirrorSurfaceAttach(Surface surface, long generation, int width, int height,
+			Messenger statusRecipient) {
+		synchronized (_mirror_surface_lock) {
+			releasePendingMirrorSurface();
+			_pending_mirror_request = MirrorSurfaceRequest.attach(
+				surface, generation, width, height, statusRecipient);
+		}
+	}
+
+	final void queueMirrorSurfaceDetach(long generation, Messenger statusRecipient) {
+		synchronized (_mirror_surface_lock) {
+			releasePendingMirrorSurface();
+			_pending_mirror_request = MirrorSurfaceRequest.detach(generation, statusRecipient);
+		}
+	}
+
+	final boolean isMirrorOutputEnabled() {
+		return MirrorSurfaceProtocol.ENABLED && !_mirror_disabled_for_session;
 	}
 
 	// SurfaceHolder callback
@@ -300,6 +332,152 @@ public abstract class ScummVM implements SurfaceHolder.Callback,
 		return _egl_surface;
 	}
 
+	/** Consume pending mirror lifecycle work on ScummVM's GL thread. */
+	@SuppressWarnings("unused") @Keep
+	final protected long[] updateMirrorSurface() {
+		MirrorSurfaceRequest request;
+		synchronized (_mirror_surface_lock) {
+			request = _pending_mirror_request;
+			_pending_mirror_request = null;
+		}
+		if (request == null)
+			return null;
+
+		if (!request.attach) {
+			// A detach invalidates the entire mirror channel. This also handles an
+			// attach/detach pair that was queued before the render thread observed it.
+			destroyMirrorSurface();
+			MirrorSurfaceProtocol.sendStatus(request.statusRecipient,
+				MirrorSurfaceProtocol.STATUS_DETACHED, request.generation, "Mirror surface detached");
+			return new long[] { 0, request.generation, 0, 0 };
+		}
+		if (!isMirrorOutputEnabled()) {
+			MirrorSurfaceProtocol.sendStatus(request.statusRecipient,
+				MirrorSurfaceProtocol.STATUS_FAILED, request.generation,
+				"Mirror rendering is disabled for this session");
+			if (request.surface != null)
+				request.surface.release();
+			return new long[] { -1, request.generation, 0, 0 };
+		}
+
+		destroyMirrorSurface();
+		try {
+			if (request.surface == null || !request.surface.isValid())
+				throw new IllegalArgumentException("Mirror surface became invalid before EGL creation");
+			_egl_mirror_surface = _egl.eglCreateWindowSurface(
+				_egl_display, _egl_config, request.surface, null);
+			int createError = _egl.eglGetError();
+			if (_egl_mirror_surface == EGL10.EGL_NO_SURFACE) {
+				throw new IllegalStateException(String.format(Locale.ROOT,
+					"eglCreateWindowSurface failed: 0x%x", createError));
+			}
+			_mirror_surface_generation = request.generation;
+			_mirror_surface_width = request.width;
+			_mirror_surface_height = request.height;
+			_mirror_status_recipient = request.statusRecipient;
+			_mirror_diagnostic_frames_remaining = 8;
+			_mirror_slow_swap_logs_remaining = 4;
+			Log.i("AdventurePadMirror", "Created mirror EGLSurface generation=" +
+				request.generation + " primary=" + _egl_surface + " mirror=" +
+				_egl_mirror_surface + " eglError=0x" + Integer.toHexString(createError) +
+				" current=" + currentEglSurfaces());
+			MirrorSurfaceProtocol.sendStatus(_mirror_status_recipient,
+				MirrorSurfaceProtocol.STATUS_ATTACHED, _mirror_surface_generation,
+				"Secondary EGLSurface attached");
+			return new long[] { 1, request.generation, request.width, request.height };
+		} catch (RuntimeException exception) {
+			_egl_mirror_surface = EGL10.EGL_NO_SURFACE;
+			MirrorSurfaceProtocol.sendStatus(request.statusRecipient,
+				MirrorSurfaceProtocol.STATUS_FAILED, request.generation, exception.getMessage());
+			Log.e(LOG_TAG, "Mirror EGLSurface creation failed", exception);
+			return new long[] { -1, request.generation, 0, 0 };
+		} finally {
+			if (request.surface != null)
+				request.surface.release();
+		}
+	}
+
+	@SuppressWarnings("unused") @Keep
+	final protected boolean makeMirrorSurfaceCurrent() {
+		String currentBefore = _mirror_diagnostic_frames_remaining > 0 ? currentEglSurfaces() : "not-sampled";
+		boolean result = _egl_mirror_surface != EGL10.EGL_NO_SURFACE &&
+			_egl.eglMakeCurrent(_egl_display, _egl_mirror_surface, _egl_mirror_surface, _egl_context);
+		int error = _egl.eglGetError();
+		if (_mirror_diagnostic_frames_remaining > 0 || !result) {
+			Log.i("AdventurePadMirror", "eglMakeCurrent(mirror) result=" + result +
+				" eglError=0x" + Integer.toHexString(error) + " primary=" + _egl_surface +
+				" mirror=" + _egl_mirror_surface + " before=" + currentBefore +
+				" after=" + currentEglSurfaces());
+		}
+		return result && error == EGL10.EGL_SUCCESS;
+	}
+
+	@SuppressWarnings("unused") @Keep
+	final protected boolean makePrimarySurfaceCurrent() {
+		String currentBefore = _mirror_diagnostic_frames_remaining > 0 ? currentEglSurfaces() : "not-sampled";
+		boolean result = _egl_surface != EGL10.EGL_NO_SURFACE &&
+			_egl.eglMakeCurrent(_egl_display, _egl_surface, _egl_surface, _egl_context);
+		int error = _egl.eglGetError();
+		if (_mirror_diagnostic_frames_remaining > 0 || !result) {
+			Log.i("AdventurePadMirror", "eglMakeCurrent(primary) result=" + result +
+				" eglError=0x" + Integer.toHexString(error) + " primary=" + _egl_surface +
+				" mirror=" + _egl_mirror_surface + " before=" + currentBefore +
+				" after=" + currentEglSurfaces());
+		}
+		if (_mirror_diagnostic_frames_remaining > 0)
+			--_mirror_diagnostic_frames_remaining;
+		return result && error == EGL10.EGL_SUCCESS;
+	}
+
+	@SuppressWarnings("unused") @Keep
+	final protected boolean swapMirrorSurface() {
+		if (_egl_mirror_surface == EGL10.EGL_NO_SURFACE)
+			return false;
+		long startedNanos = System.nanoTime();
+		boolean swapped = _egl.eglSwapBuffers(_egl_display, _egl_mirror_surface);
+		int error = _egl.eglGetError();
+		long durationMicros = (System.nanoTime() - startedNanos) / 1000L;
+		boolean logSlowSwap = durationMicros > 20000L && _mirror_slow_swap_logs_remaining > 0;
+		if (_mirror_diagnostic_frames_remaining > 0 || logSlowSwap || !swapped) {
+			Log.i("AdventurePadMirror", "Mirror swap generation=" + _mirror_surface_generation +
+				" durationUs=" + durationMicros + " success=" + swapped + " eglError=0x" +
+				Integer.toHexString(error) + " current=" + currentEglSurfaces());
+			if (logSlowSwap)
+				--_mirror_slow_swap_logs_remaining;
+		}
+		return swapped && error == EGL10.EGL_SUCCESS;
+	}
+
+	@SuppressWarnings("unused") @Keep
+	final protected void reportMirrorStatus(int status, long generation, String diagnostic) {
+		if (generation == _mirror_surface_generation)
+			MirrorSurfaceProtocol.sendStatus(_mirror_status_recipient, status, generation, diagnostic);
+	}
+
+	@SuppressWarnings("unused") @Keep
+	final protected boolean failMirrorSurface(long generation, String diagnostic) {
+		if (generation != _mirror_surface_generation)
+			return false;
+		boolean primaryRestored = makePrimarySurfaceCurrent();
+		if (!primaryRestored) {
+			_mirror_disabled_for_session = true;
+			Log.e("AdventurePadMirror", "Primary EGLSurface restoration failed; mirror disabled for session");
+		}
+		Messenger recipient = _mirror_status_recipient;
+		destroyMirrorSurface();
+		MirrorSurfaceProtocol.sendStatus(recipient, MirrorSurfaceProtocol.STATUS_FAILED,
+			generation, diagnostic);
+		return primaryRestored;
+	}
+
+	private String currentEglSurfaces() {
+		if (_egl == null)
+			return "egl=null";
+		return "draw=" + _egl.eglGetCurrentSurface(EGL10.EGL_DRAW) +
+			" read=" + _egl.eglGetCurrentSurface(EGL10.EGL_READ) +
+			" context=" + _egl.eglGetCurrentContext();
+	}
+
 	/** @noinspection unused
 	 * Callback from C++ peer instance
 	 */
@@ -334,6 +512,11 @@ public abstract class ScummVM implements SurfaceHolder.Callback,
 	}
 
 	private void deinitEGL() {
+		destroyMirrorSurface();
+		synchronized (_mirror_surface_lock) {
+			releasePendingMirrorSurface();
+			_pending_mirror_request = null;
+		}
 		if (_egl_display != EGL10.EGL_NO_DISPLAY) {
 			_egl.eglMakeCurrent(_egl_display, EGL10.EGL_NO_SURFACE,
 								EGL10.EGL_NO_SURFACE, EGL10.EGL_NO_CONTEXT);
@@ -352,6 +535,57 @@ public abstract class ScummVM implements SurfaceHolder.Callback,
 		_egl_config = null;
 		_egl_display = EGL10.EGL_NO_DISPLAY;
 		_egl = null;
+	}
+
+	private void destroyMirrorSurface() {
+		if (_egl != null && _egl_display != EGL10.EGL_NO_DISPLAY &&
+			_egl_mirror_surface != EGL10.EGL_NO_SURFACE) {
+			EGLSurface destroyedSurface = _egl_mirror_surface;
+			String currentBeforeDestroy = currentEglSurfaces();
+			boolean destroyed = _egl.eglDestroySurface(_egl_display, destroyedSurface);
+			int error = _egl.eglGetError();
+			Log.i("AdventurePadMirror", "eglDestroySurface mirror=" + destroyedSurface +
+				" result=" + destroyed + " eglError=0x" + Integer.toHexString(error) +
+				" currentBefore=" + currentBeforeDestroy + " currentAfter=" + currentEglSurfaces());
+		}
+		_egl_mirror_surface = EGL10.EGL_NO_SURFACE;
+		_mirror_surface_generation = 0;
+		_mirror_surface_width = 0;
+		_mirror_surface_height = 0;
+		_mirror_status_recipient = null;
+	}
+
+	private void releasePendingMirrorSurface() {
+		if (_pending_mirror_request != null && _pending_mirror_request.surface != null)
+			_pending_mirror_request.surface.release();
+	}
+
+	private static final class MirrorSurfaceRequest {
+		final boolean attach;
+		final Surface surface;
+		final long generation;
+		final int width;
+		final int height;
+		final Messenger statusRecipient;
+
+		private MirrorSurfaceRequest(boolean attach, Surface surface, long generation,
+				int width, int height, Messenger statusRecipient) {
+			this.attach = attach;
+			this.surface = surface;
+			this.generation = generation;
+			this.width = width;
+			this.height = height;
+			this.statusRecipient = statusRecipient;
+		}
+
+		static MirrorSurfaceRequest attach(Surface surface, long generation, int width, int height,
+				Messenger statusRecipient) {
+			return new MirrorSurfaceRequest(true, surface, generation, width, height, statusRecipient);
+		}
+
+		static MirrorSurfaceRequest detach(long generation, Messenger statusRecipient) {
+			return new MirrorSurfaceRequest(false, null, generation, 0, 0, statusRecipient);
+		}
 	}
 
 	private static final int[] s_eglAttribs = {

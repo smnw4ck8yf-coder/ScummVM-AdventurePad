@@ -11,6 +11,7 @@ package org.scummvm.scummvm;
 import android.app.Service;
 import android.content.Intent;
 import android.os.Handler;
+import android.os.Bundle;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.Message;
@@ -18,6 +19,7 @@ import android.os.Messenger;
 import android.util.Log;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
+import android.view.Surface;
 
 import java.util.HashSet;
 
@@ -36,6 +38,7 @@ public final class RelativeInputService extends Service {
 	private static final int JOYSTICK_AXIS_MAX = 32767;
 	private static final int JOYSTICK_TRIGGER_FLAGS = 0x40 | 0x80;
 	private static final int JOYSTICK_VALID_FLAGS = 0xff;
+	private static final int MAX_MIRROR_DIMENSION = 8192;
 
 	private static volatile ScummVM _nativeEventSink;
 
@@ -45,6 +48,8 @@ public final class RelativeInputService extends Service {
 	private final HashSet<Integer> _gamepadKeysDown = new HashSet<>();
 	private boolean _leftButtonDown;
 	private boolean _rightButtonDown;
+	private long _latestMirrorGeneration;
+	private long _activeMirrorGeneration;
 	private final Messenger _messenger = new Messenger(new IncomingHandler(Looper.getMainLooper()));
 
 	static void attachNativeEventSink(ScummVM sink) {
@@ -67,6 +72,7 @@ public final class RelativeInputService extends Service {
 
 	@Override
 	public boolean onUnbind(Intent intent) {
+		detachMirrorForDisconnect();
 		releaseForwardedInput();
 		Log.i(TAG, "AdventurePad Messenger disconnected");
 		return super.onUnbind(intent);
@@ -74,6 +80,7 @@ public final class RelativeInputService extends Service {
 
 	@Override
 	public void onDestroy() {
+		detachMirrorForDisconnect();
 		releaseForwardedInput();
 		_fractionalResidualX = 0.0;
 		_fractionalResidualY = 0.0;
@@ -104,9 +111,81 @@ public final class RelativeInputService extends Service {
 			case MSG_GAMEPAD_KEY:
 				forwardGamepadKey(message.arg1, message.arg2);
 				return;
+			case MirrorSurfaceProtocol.MSG_ATTACH_SURFACE:
+				attachMirrorSurface(message);
+				return;
+			case MirrorSurfaceProtocol.MSG_DETACH_SURFACE:
+				detachMirrorSurface(message);
+				return;
 			default:
 				Log.w(TAG, "Rejected unknown Messenger message type " + message.what);
 			}
+		}
+
+		private void attachMirrorSurface(Message message) {
+			Bundle data = message.getData();
+			data.setClassLoader(Surface.class.getClassLoader());
+			Surface surface = getMirrorSurface(data);
+			long generation = data.getLong(MirrorSurfaceProtocol.KEY_GENERATION, 0);
+			int width = data.getInt(MirrorSurfaceProtocol.KEY_WIDTH, 0);
+			int height = data.getInt(MirrorSurfaceProtocol.KEY_HEIGHT, 0);
+			int displayId = data.getInt(MirrorSurfaceProtocol.KEY_DISPLAY_ID, -1);
+
+			String rejection = validateMirrorAttachment(surface, generation, width, height);
+			ScummVM sink = _nativeEventSink;
+			if (!MirrorSurfaceProtocol.ENABLED)
+				rejection = "Mirror prototype is disabled";
+			else if (sink == null)
+				rejection = "Native renderer is unavailable";
+			else if (!sink.isMirrorOutputEnabled())
+				rejection = "Mirror rendering is disabled for this session";
+
+			if (rejection != null) {
+				if (surface != null)
+					surface.release();
+				MirrorSurfaceProtocol.sendStatus(message.replyTo, MirrorSurfaceProtocol.STATUS_FAILED,
+					generation, rejection);
+				Log.w(TAG, "Rejected mirror surface generation " + generation + ": " + rejection);
+				return;
+			}
+
+			_latestMirrorGeneration = generation;
+			_activeMirrorGeneration = generation;
+			Log.i(TAG, "Accepted mirror surface generation " + generation + " size=" +
+				width + "x" + height + " reportedDisplayId=" + displayId);
+			sink.queueMirrorSurfaceAttach(surface, generation, width, height, message.replyTo);
+		}
+
+		private void detachMirrorSurface(Message message) {
+			long generation = message.getData().getLong(MirrorSurfaceProtocol.KEY_GENERATION, 0);
+			if (generation <= 0 || generation != _activeMirrorGeneration) {
+				MirrorSurfaceProtocol.sendStatus(message.replyTo, MirrorSurfaceProtocol.STATUS_FAILED,
+					generation, "Detach does not match the active surface generation");
+				return;
+			}
+
+			_activeMirrorGeneration = 0;
+			ScummVM sink = _nativeEventSink;
+			if (sink != null)
+				sink.queueMirrorSurfaceDetach(generation, message.replyTo);
+			else
+				MirrorSurfaceProtocol.sendStatus(message.replyTo, MirrorSurfaceProtocol.STATUS_DETACHED,
+					generation, "Renderer already unavailable");
+		}
+
+		private String validateMirrorAttachment(Surface surface, long generation, int width, int height) {
+			if (surface == null || !surface.isValid())
+				return "Surface is null or invalid";
+			if (generation <= _latestMirrorGeneration)
+				return "Surface generation is stale";
+			if (width <= 0 || height <= 0 || width > MAX_MIRROR_DIMENSION || height > MAX_MIRROR_DIMENSION)
+				return "Surface dimensions are outside the accepted bounds";
+			return null;
+		}
+
+		@SuppressWarnings("deprecation")
+		private Surface getMirrorSurface(Bundle data) {
+			return data.getParcelable(MirrorSurfaceProtocol.KEY_SURFACE);
 		}
 
 		private void forwardRelativeMove(Message message) {
@@ -232,6 +311,14 @@ public final class RelativeInputService extends Service {
 			if (sink != null)
 				sink.pushEvent(ScummVMEvents.JE_GAMEPAD, action, keyCode, 0, 0, 0, 0);
 		}
+	}
+
+	private void detachMirrorForDisconnect() {
+		long generation = _activeMirrorGeneration;
+		_activeMirrorGeneration = 0;
+		ScummVM sink = _nativeEventSink;
+		if (generation > 0 && sink != null)
+			sink.queueMirrorSurfaceDetach(generation, null);
 	}
 
 	private void releaseForwardedInput() {
