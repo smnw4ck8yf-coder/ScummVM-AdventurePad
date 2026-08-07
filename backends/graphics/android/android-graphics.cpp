@@ -687,20 +687,12 @@ void AndroidGraphicsManager::renderMirrorSurface() {
 	const int cropTop = MAX(0, MIN(sourceHeight - 1, (int)std::lround(_mirrorCropTop * sourceHeight)));
 	const int cropRight = MAX(cropLeft + 1, MIN(sourceWidth, (int)std::ceil(_mirrorCropRight * sourceWidth)));
 	const int cropBottom = MAX(cropTop + 1, MIN(sourceHeight, (int)std::ceil(_mirrorCropBottom * sourceHeight)));
-	const int cropWidth = cropRight - cropLeft;
-	const int cropHeight = cropBottom - cropTop;
-	const bool rotatedDimensions = _rotationMode == Common::kRotation90 ||
-		_rotationMode == Common::kRotation270;
-	const int orientedCropWidth = rotatedDimensions ? cropHeight : cropWidth;
-	const int orientedCropHeight = rotatedDimensions ? cropWidth : cropHeight;
-	int destinationWidth = surfaceWidth;
-	int destinationHeight = MAX(1, (int)((int64)surfaceWidth * orientedCropHeight / orientedCropWidth));
-	if (destinationHeight > surfaceHeight) {
-		destinationHeight = surfaceHeight;
-		destinationWidth = MAX(1, (int)((int64)surfaceHeight * orientedCropWidth / orientedCropHeight));
-	}
-	const int destinationX = (surfaceWidth - destinationWidth) / 2;
-	const int destinationY = (surfaceHeight - destinationHeight) / 2;
+	// Split View intentionally maps the configured crop across the complete lower
+	// surface. X and Y scales are independent; do not aspect-fit or add padding.
+	const int destinationX = 0;
+	const int destinationY = 0;
+	const int destinationWidth = surfaceWidth;
+	const int destinationHeight = surfaceHeight;
 	const GLenum beforeDrawError = glGetError();
 	// Clip by interpolating within the texture's own canonical flip/rotation
 	// coordinates. Never assume an unflipped 0..1 orientation here.
