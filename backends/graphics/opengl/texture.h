@@ -107,8 +107,11 @@ public:
 	void fill(uint32 color);
 	void fill(const Common::Rect &r, uint32 color);
 
-	void flagDirty() { _allDirty = true; }
+	void flagDirty();
 	virtual bool isDirty() const { return _allDirty || !_dirtyArea.isEmpty(); }
+	uint32 getMutationGeneration() const { return _mutationGeneration; }
+	uint32 getCleanGeneration() const { return _cleanGeneration; }
+	Common::Rect getDirtyAreaForDiagnostics() const { return getDirtyArea(); }
 
 	virtual uint getWidth() const = 0;
 	virtual uint getHeight() const = 0;
@@ -125,6 +128,19 @@ public:
 	 * @return Whether the surface is having a palette.
 	 */
 	virtual bool hasPalette() const { return false; }
+	virtual uint32 getPaletteGeneration() const { return 0; }
+	virtual bool isPaletteUploadPending() const { return false; }
+	virtual uint32 getInputUploadGeneration() const { return getGLTexture().getUploadGeneration(); }
+	virtual uint32 getPaletteUploadGeneration() const { return 0; }
+	virtual uint32 getFramebufferGeneration() const { return 0; }
+	virtual uint32 getFramebufferStorageGeneration() const { return 0; }
+	virtual bool wasLastFramebufferGenerationSuccessful() const { return false; }
+	virtual bool isGPUGeneratedSource() const { return false; }
+	virtual bool isSourceDataReady() const {
+		const Texture &texture = getGLTexture();
+		return texture.wasLastUploadSuccessful() &&
+			texture.getUploadedStorageGeneration() == texture.getStorageGeneration();
+	}
 
 	/**
 	 * Set color key for paletted textures.
@@ -148,13 +164,15 @@ public:
 	 */
 	virtual const Texture &getGLTexture() const = 0;
 protected:
-	void clearDirty() { _allDirty = false; _dirtyArea = Common::Rect(); }
+	void clearDirty();
 
 	void addDirtyArea(const Common::Rect &r);
 	Common::Rect getDirtyArea() const;
 private:
 	bool _allDirty;
 	Common::Rect _dirtyArea;
+	uint32 _mutationGeneration;
+	uint32 _cleanGeneration;
 };
 
 /**
@@ -219,6 +237,7 @@ public:
 	Graphics::PixelFormat getFormat() const override { return _fakeFormat; }
 
 	bool hasPalette() const override { return (_palette != nullptr); }
+	uint32 getPaletteGeneration() const override { return _paletteGeneration; }
 
 	void setColorKey(uint colorKey) override;
 	void setPalette(uint start, uint colors, const byte *palData) override;
@@ -235,6 +254,7 @@ protected:
 	Graphics::FastBlitFunc _blitFunc;
 	uint32 *_palette;
 	uint8 *_mask;
+	uint32 _paletteGeneration;
 };
 
 #ifdef USE_SCALERS
@@ -292,6 +312,18 @@ public:
 	Graphics::PixelFormat getFormat() const override;
 
 	bool hasPalette() const override { return true; }
+	uint32 getPaletteGeneration() const override { return _paletteGeneration; }
+	bool isPaletteUploadPending() const override { return _paletteDirty; }
+	uint32 getInputUploadGeneration() const override { return _clut8Texture.getUploadGeneration(); }
+	uint32 getPaletteUploadGeneration() const override { return _paletteTexture.getUploadGeneration(); }
+	uint32 getFramebufferGeneration() const override { return _framebufferGeneration; }
+	uint32 getFramebufferStorageGeneration() const override { return _framebufferStorageGeneration; }
+	bool wasLastFramebufferGenerationSuccessful() const override { return _lastFramebufferGenerationSuccessful; }
+	bool isGPUGeneratedSource() const override { return true; }
+	bool isSourceDataReady() const override {
+		return _lastFramebufferGenerationSuccessful && _framebufferGeneration > 0 &&
+			_framebufferStorageGeneration == getGLTexture().getStorageGeneration();
+	}
 
 	void setColorKey(uint colorKey) override;
 	void setPalette(uint start, uint colors, const byte *palData) override;
@@ -325,6 +357,10 @@ private:
 
 	byte _palette[4 * 256];
 	bool _paletteDirty;
+	uint32 _paletteGeneration;
+	uint32 _framebufferGeneration;
+	uint32 _framebufferStorageGeneration;
+	bool _lastFramebufferGenerationSuccessful;
 };
 #endif // !USE_FORCED_GLES
 

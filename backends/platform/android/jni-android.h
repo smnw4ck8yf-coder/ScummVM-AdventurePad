@@ -110,7 +110,17 @@ public:
 	static bool makePrimarySurfaceCurrent();
 	static bool swapMirrorSurface();
 	static void reportMirrorStatus(int status, const char *diagnostic);
+	static void reportMirrorCursor(int x, int y, bool visible, int64 geometryGeneration);
 	static bool failMirrorSurface(const char *diagnostic);
+	static int64 reportMirrorSourceGeometry(int width, int height, int capability, int orientation);
+	static bool updateMirrorCrop(int64 &cropGeneration, int64 &geometryGeneration,
+			float &left, float &top, float &right, float &bottom);
+	static void reportMirrorCropAck(int result, int64 cropGeneration,
+			int64 geometryGeneration, const char *diagnostic);
+	static bool updateUpperPresentation(int &mode, int64 &modeGeneration,
+			int64 &geometryGeneration, float &left, float &top, float &right, float &bottom);
+	static void reportUpperPresentationAck(int result, int64 modeGeneration,
+			int64 geometryGeneration, const char *diagnostic);
 	static int mirrorSurfaceWidth() { return _mirror_surface_width; }
 	static int mirrorSurfaceHeight() { return _mirror_surface_height; }
 	static int64 mirrorSurfaceGeneration() { return _mirror_surface_generation; }
@@ -181,7 +191,13 @@ private:
 	static jmethodID _MID_makePrimarySurfaceCurrent;
 	static jmethodID _MID_swapMirrorSurface;
 	static jmethodID _MID_reportMirrorStatus;
+	static jmethodID _MID_reportMirrorCursor;
 	static jmethodID _MID_failMirrorSurface;
+	static jmethodID _MID_reportMirrorSourceGeometry;
+	static jmethodID _MID_updateMirrorCrop;
+	static jmethodID _MID_reportMirrorCropAck;
+	static jmethodID _MID_updateUpperPresentation;
+	static jmethodID _MID_reportUpperPresentationAck;
 	static jmethodID _MID_eglVersion;
 	static jmethodID _MID_getNewSAFTree;
 	static jmethodID _MID_getSAFTrees;

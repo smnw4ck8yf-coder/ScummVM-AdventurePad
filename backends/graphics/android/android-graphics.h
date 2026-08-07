@@ -40,10 +40,12 @@ public:
 	WindowedGraphicsManager::Insets getSafeAreaInsets() const override;
 
 	void updateScreen() override;
+	void handleMirrorLifecycleChange();
 
 	void displayMessageOnOSD(const Common::U32String &msg) override;
 
 	bool notifyMousePosition(Common::Point &mouse);
+	bool notifyMousePositionVirtual(Common::Point &mouse);
 	Common::Point getMousePosition() { return Common::Point(_cursorX, _cursorY); }
 
 	float getHiDPIScreenFactor() const override;
@@ -57,6 +59,11 @@ public:
 
 protected:
 	void recalculateDisplayAreas() override;
+	Common::Rect getPresentationGameRect() const override;
+	bool getPresentationTextureCrop(GLfloat &left, GLfloat &top,
+			GLfloat &right, GLfloat &bottom) const override;
+	bool transformCursorForPresentation(GLfloat &x, GLfloat &y,
+			GLfloat &width, GLfloat &height) const override;
 	void setSystemMousePosition(const int x, const int y) override {}
 
 	void showOverlay(bool inGUI) override;
@@ -69,12 +76,45 @@ protected:
 
 private:
 	void renderMirrorSurface();
+	void updateMirrorSourceGeometry();
+	void updateUpperPresentation();
+	void logMirrorRenderTransition(const char *stage);
+	void logMirrorTextureLifecycle(const char *stage);
 
 	OpenGL::Surface *_touchcontrols;
 	OpenGL::Backbuffer _mirrorTarget;
 	int64 _mirrorGeneration;
 	int _mirrorSourceState;
 	int _mirrorDiagnosticFramesRemaining;
+	int _mirrorSourceWidth;
+	int _mirrorSourceHeight;
+	int _mirrorSourceOrientation;
+	int64 _mirrorGeometryGeneration;
+	float _mirrorCropLeft;
+	float _mirrorCropTop;
+	float _mirrorCropRight;
+	float _mirrorCropBottom;
+	int64 _pendingCropAckGeneration;
+	int64 _pendingCropAckGeometryGeneration;
+	bool _upperPresentationExpanded;
+	float _upperGameplayLeft;
+	float _upperGameplayTop;
+	float _upperGameplayRight;
+	float _upperGameplayBottom;
+	int64 _pendingModeAckGeneration;
+	int64 _pendingModeAckGeometryGeneration;
+	int _pendingModeAckResult;
+	int _reportedMirrorCursorX;
+	int _reportedMirrorCursorY;
+	bool _reportedMirrorCursorVisible;
+	int64 _reportedMirrorCursorGeometryGeneration;
+	int _mirrorRenderLogCount;
+	int _mirrorRefreshEventCount;
+	bool _mirrorRefreshFramePending;
+	bool _mirrorCursorFramePending;
+	bool _awaitingFirstMirrorCursorMovement;
+	int _mirrorTextureTraceSequence;
+	int _mirrorTextureTraceLogCount;
 	int _old_touch_mode;
 	bool _rendering3d;
 };

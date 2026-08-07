@@ -89,9 +89,14 @@ enum {
 	JE_MOUSE_WHEEL_DOWN = 23,
 	JE_TV_REMOTE = 24,
 	JE_MOUSE_BUTTON = 25,
+	JE_ABSOLUTE_SOURCE_POINTER = 26,
+	JE_MIRROR_REFRESH = 27,
 	JE_QUIT = 0x1000,
 	JE_MENU = 0x1001
 };
+
+static const Common::CustomEventType kAndroidAlreadyInVirtualSourceCoordinates = 0x41505356;
+static const Common::CustomEventType kAndroidMirrorLifecycleRefresh = 0x41504D52;
 
 // meta modifier
 enum {
@@ -1154,6 +1159,33 @@ void OSystem_Android::pushEvent(int type, int arg1, int arg2, int arg3,
 		pushEvent(ev0);
 		break;
 
+	case JE_ABSOLUTE_SOURCE_POINTER:
+		if (arg1 == 3) // CANCEL terminates Java-side ownership without a click.
+			break;
+		if (arg1 < 0 || arg1 > 2 || arg2 < 0 || arg3 < 0) {
+			LOGE("invalid absolute-source pointer action=%d x=%d y=%d", arg1, arg2, arg3);
+			return;
+		}
+		ev0.type = Common::EVENT_MOUSEMOVE;
+		ev0.mouse.x = arg2;
+		ev0.mouse.y = arg3;
+		ev0.customType = kAndroidAlreadyInVirtualSourceCoordinates;
+		pushEvent(ev0);
+		if (arg1 == 2) {
+			Common::Event down = ev0;
+			down.type = Common::EVENT_LBUTTONDOWN;
+			Common::Event up = ev0;
+			up.type = Common::EVENT_LBUTTONUP;
+			pushEvent(down, up);
+		}
+		break;
+
+	case JE_MIRROR_REFRESH:
+		ev0.type = Common::EVENT_CUSTOM_BACKEND_ACTION_START;
+		ev0.customType = kAndroidMirrorLifecycleRefresh;
+		pushEvent(ev0);
+		break;
+
 	case JE_LMB_DOWN:
 		ev0.type = Common::EVENT_LBUTTONDOWN;
 		ev0.mouse.x = arg1;
@@ -1566,9 +1598,20 @@ bool OSystem_Android::pollEvent(Common::Event &event) {
 	}
 	_event_queue_lock->unlock();
 
+	if (event.customType == kAndroidMirrorLifecycleRefresh) {
+		dynamic_cast<AndroidGraphicsManager *>(_graphicsManager)->handleMirrorLifecycleChange();
+		return false;
+	}
+
 	if (Common::isMouseEvent(event)) {
-		if (_graphicsManager)
-			return dynamic_cast<AndroidGraphicsManager *>(_graphicsManager)->notifyMousePosition(event.mouse);
+		if (_graphicsManager) {
+			AndroidGraphicsManager *graphics = dynamic_cast<AndroidGraphicsManager *>(_graphicsManager);
+			if (event.customType == kAndroidAlreadyInVirtualSourceCoordinates) {
+				event.customType = 0;
+				return graphics->notifyMousePositionVirtual(event.mouse);
+			}
+			return graphics->notifyMousePosition(event.mouse);
+		}
 	}
 
 	return true;

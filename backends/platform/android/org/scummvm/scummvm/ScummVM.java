@@ -66,7 +66,32 @@ public abstract class ScummVM implements SurfaceHolder.Callback,
 	private Messenger _mirror_status_recipient;
 	private int _mirror_diagnostic_frames_remaining;
 	private int _mirror_slow_swap_logs_remaining;
+	private int _mirror_render_log_count;
 	private volatile boolean _mirror_disabled_for_session;
+	private final Object _mirror_crop_lock = new Object();
+	private MirrorCropRequest _pending_mirror_crop;
+	private Messenger _geometry_recipient;
+	private Messenger _crop_ack_recipient;
+	private long _crop_ack_generation;
+	private int _mirror_source_width;
+	private int _mirror_source_height;
+	private int _mirror_source_capability;
+	private long _mirror_geometry_generation = 1L;
+	private UpperPresentationRequest _pending_upper_presentation;
+	private Messenger _upper_presentation_ack_recipient;
+	private long _upper_presentation_ack_generation;
+	private MirrorCropRequest _crop_ack_request;
+	private long _active_crop_generation;
+	private long _active_crop_geometry_generation;
+	private float _active_crop_left;
+	private float _active_crop_top;
+	private float _active_crop_right = 1.0f;
+	private float _active_crop_bottom = 1.0f;
+	private boolean _split_view_active;
+	private long _active_pointer_sequence;
+	private int _active_pointer_id = -1;
+	private long _last_pointer_sequence;
+	private int _mirror_source_orientation;
 
 	private SurfaceHolder _surface_holder;
 	private int bitsPerPixel;
@@ -174,6 +199,7 @@ public abstract class ScummVM implements SurfaceHolder.Callback,
 			_pending_mirror_request = MirrorSurfaceRequest.attach(
 				surface, generation, width, height, statusRecipient);
 		}
+		requestMirrorRefresh("ATTACH generation=" + generation);
 	}
 
 	final void queueMirrorSurfaceDetach(long generation, Messenger statusRecipient) {
@@ -181,6 +207,67 @@ public abstract class ScummVM implements SurfaceHolder.Callback,
 			releasePendingMirrorSurface();
 			_pending_mirror_request = MirrorSurfaceRequest.detach(generation, statusRecipient);
 		}
+		queueUpperPresentationFallback();
+	}
+
+	final void queueMirrorGeometryQuery(Messenger recipient) {
+		synchronized (_mirror_crop_lock) {
+			_geometry_recipient = recipient;
+			if (_mirror_source_width > 0 && _mirror_source_height > 0) {
+				MirrorSurfaceProtocol.sendGeometry(recipient, _mirror_source_width,
+					_mirror_source_height, _mirror_source_capability, _mirror_geometry_generation,
+					RelativeInputService.getCurrentGameTarget(), _mirror_source_orientation);
+			}
+		}
+	}
+
+	final void queueMirrorCrop(float left, float top, float right, float bottom,
+			long cropGeneration, long expectedGeometryGeneration, Messenger recipient) {
+		synchronized (_mirror_crop_lock) {
+			_active_crop_generation = 0;
+			resetAbsoluteSourcePointerLocked();
+			_pending_mirror_crop = new MirrorCropRequest(left, top, right, bottom,
+				cropGeneration, expectedGeometryGeneration, recipient);
+		}
+		requestMirrorRefresh("CROP generation=" + cropGeneration);
+	}
+
+	final void queueMirrorCropFallback() {
+		synchronized (_mirror_crop_lock) {
+			_active_crop_generation = 0;
+			resetAbsoluteSourcePointerLocked();
+			_pending_mirror_crop = MirrorCropRequest.fallback();
+		}
+		requestMirrorRefresh("CROP fallback");
+	}
+
+	final void queueUpperPresentation(int mode, float left, float top, float right, float bottom,
+			long modeGeneration, long expectedGeometryGeneration, Messenger recipient) {
+		synchronized (_mirror_crop_lock) {
+			_split_view_active = false;
+			resetAbsoluteSourcePointerLocked();
+			_pending_upper_presentation = new UpperPresentationRequest(mode, left, top, right,
+				bottom, modeGeneration, expectedGeometryGeneration, recipient);
+		}
+		requestMirrorRefresh("MODE generation=" + modeGeneration + " mode=" + mode);
+	}
+
+	final void queueUpperPresentationFallback() {
+		synchronized (_mirror_crop_lock) {
+			_pending_upper_presentation = UpperPresentationRequest.fullFrame();
+			_split_view_active = false;
+			resetAbsoluteSourcePointerLocked();
+		}
+		requestMirrorRefresh("MODE fallback");
+	}
+
+	private void requestMirrorRefresh(String reason) {
+		if (_mirror_render_log_count < 64) {
+			++_mirror_render_log_count;
+			Log.i("AdventurePadRender", "event=" + _mirror_render_log_count +
+				"/64 protocol queued " + reason + "; pushing JE_MIRROR_REFRESH");
+		}
+		pushEvent(ScummVMEvents.JE_MIRROR_REFRESH, 0, 0, 0, 0, 0, 0);
 	}
 
 	final boolean isMirrorOutputEnabled() {
@@ -398,6 +485,182 @@ public abstract class ScummVM implements SurfaceHolder.Callback,
 	}
 
 	@SuppressWarnings("unused") @Keep
+	final protected long reportMirrorSourceGeometry(int width, int height, int capability, int orientation) {
+		synchronized (_mirror_crop_lock) {
+			if (width <= 0 || height <= 0 || capability <= 0) {
+				width = 0;
+				height = 0;
+				capability = 0;
+			}
+			if (_mirror_source_width != width || _mirror_source_height != height ||
+				_mirror_source_capability != capability || _mirror_source_orientation != orientation) {
+				_mirror_source_width = width;
+				_mirror_source_height = height;
+				_mirror_source_capability = capability;
+				_mirror_source_orientation = orientation;
+				++_mirror_geometry_generation;
+				_pending_mirror_crop = MirrorCropRequest.fallback();
+				_pending_upper_presentation = UpperPresentationRequest.fullFrame();
+				resetAbsoluteSourcePointerLocked();
+				_split_view_active = false;
+			}
+			MirrorSurfaceProtocol.sendGeometry(_geometry_recipient, width, height, capability,
+					_mirror_geometry_generation, RelativeInputService.getCurrentGameTarget(), orientation);
+			return _mirror_geometry_generation;
+		}
+	}
+
+	@SuppressWarnings("unused") @Keep
+	final protected double[] updateMirrorCrop() {
+		synchronized (_mirror_crop_lock) {
+			MirrorCropRequest request = _pending_mirror_crop;
+			_pending_mirror_crop = null;
+			if (request == null)
+				return null;
+			if (request.cropGeneration > 0 &&
+				request.expectedGeometryGeneration != _mirror_geometry_generation) {
+				MirrorSurfaceProtocol.sendCropAck(request.recipient,
+					MirrorSurfaceProtocol.CROP_INCOMPATIBLE_GEOMETRY, request.cropGeneration,
+					_mirror_geometry_generation, "Source geometry generation changed");
+				return MirrorCropRequest.fallback().toArray(_mirror_geometry_generation);
+			}
+			if (request.cropGeneration > 0 && _mirror_source_capability == 0) {
+				MirrorSurfaceProtocol.sendCropAck(request.recipient,
+					MirrorSurfaceProtocol.CROP_UNSUPPORTED_SOURCE, request.cropGeneration,
+					_mirror_geometry_generation, "Current renderer has no crop-capable source");
+				return MirrorCropRequest.fallback().toArray(_mirror_geometry_generation);
+			}
+			_crop_ack_recipient = request.recipient;
+			_crop_ack_generation = request.cropGeneration;
+			_crop_ack_request = request;
+			return request.toArray(_mirror_geometry_generation);
+		}
+	}
+
+	@SuppressWarnings("unused") @Keep
+	final protected void reportMirrorCropAck(int result, long cropGeneration,
+			long geometryGeneration, String diagnostic) {
+		synchronized (_mirror_crop_lock) {
+			if (cropGeneration <= 0 || cropGeneration != _crop_ack_generation)
+				return;
+			MirrorSurfaceProtocol.sendCropAck(_crop_ack_recipient, result, cropGeneration,
+				geometryGeneration, diagnostic);
+			if (result == MirrorSurfaceProtocol.CROP_APPLIED && _crop_ack_request != null) {
+				_active_crop_generation = cropGeneration;
+				_active_crop_geometry_generation = geometryGeneration;
+				_active_crop_left = _crop_ack_request.left;
+				_active_crop_top = _crop_ack_request.top;
+				_active_crop_right = _crop_ack_request.right;
+				_active_crop_bottom = _crop_ack_request.bottom;
+			} else {
+				_active_crop_generation = 0;
+				resetAbsoluteSourcePointerLocked();
+			}
+			_crop_ack_recipient = null;
+			_crop_ack_generation = 0;
+			_crop_ack_request = null;
+		}
+	}
+
+	@SuppressWarnings("unused") @Keep
+	final protected double[] updateUpperPresentation() {
+		synchronized (_mirror_crop_lock) {
+			UpperPresentationRequest request = _pending_upper_presentation;
+			_pending_upper_presentation = null;
+			if (request == null)
+				return null;
+			if (request.modeGeneration > 0 &&
+				request.expectedGeometryGeneration != _mirror_geometry_generation) {
+				MirrorSurfaceProtocol.sendDisplayModeAck(request.recipient,
+					MirrorSurfaceProtocol.MODE_STALE_GENERATION, request.modeGeneration,
+					_mirror_geometry_generation, "Source geometry generation changed");
+				return UpperPresentationRequest.fullFrame().toArray(_mirror_geometry_generation);
+			}
+			if (request.modeGeneration > 0 && _mirror_source_capability == 0) {
+				MirrorSurfaceProtocol.sendDisplayModeAck(request.recipient,
+					MirrorSurfaceProtocol.MODE_UNSUPPORTED_RENDERER, request.modeGeneration,
+					_mirror_geometry_generation, "Current renderer cannot expand presentation");
+				return UpperPresentationRequest.fullFrame().toArray(_mirror_geometry_generation);
+			}
+			_upper_presentation_ack_recipient = request.recipient;
+			_upper_presentation_ack_generation = request.modeGeneration;
+			return request.toArray(_mirror_geometry_generation);
+		}
+	}
+
+	@SuppressWarnings("unused") @Keep
+	final protected void reportUpperPresentationAck(int result, long modeGeneration,
+			long geometryGeneration, String diagnostic) {
+		synchronized (_mirror_crop_lock) {
+			if (modeGeneration <= 0 || modeGeneration != _upper_presentation_ack_generation)
+				return;
+			MirrorSurfaceProtocol.sendDisplayModeAck(_upper_presentation_ack_recipient, result,
+				modeGeneration, geometryGeneration, diagnostic);
+			_split_view_active = result == MirrorSurfaceProtocol.MODE_EXPANDED_APPLIED;
+			if (!_split_view_active)
+				resetAbsoluteSourcePointerLocked();
+			_upper_presentation_ack_recipient = null;
+			_upper_presentation_ack_generation = 0;
+		}
+	}
+
+	final boolean pushAbsoluteSourcePointer(int x, int y, int action, int pointerId,
+			long sequenceId, long cropGeneration, long geometryGeneration) {
+		synchronized (_mirror_crop_lock) {
+			if (!_split_view_active || !isMirrorOutputEnabled() || sequenceId <= 0 || pointerId < 0 ||
+				cropGeneration != _active_crop_generation ||
+				geometryGeneration != _active_crop_geometry_generation ||
+				geometryGeneration != _mirror_geometry_generation || x < 0 || y < 0 ||
+				x >= _mirror_source_width || y >= _mirror_source_height ||
+				!isInsideActiveCrop(x, y))
+				return false;
+			switch (action) {
+			case 1: // DOWN moves the canonical cursor but does not press a mouse button.
+				if (_active_pointer_sequence != 0 || sequenceId <= _last_pointer_sequence)
+					return false;
+				_active_pointer_sequence = sequenceId;
+				_active_pointer_id = pointerId;
+				break;
+			case 0: // MOVE
+			case 2: // UP performs the click in native virtual coordinates.
+				if (sequenceId != _active_pointer_sequence || pointerId != _active_pointer_id)
+					return false;
+				break;
+			case 3: // CANCEL
+				if (sequenceId != _active_pointer_sequence || pointerId != _active_pointer_id)
+					return false;
+				break;
+			default:
+				return false;
+			}
+			pushEvent(ScummVMEvents.JE_ABSOLUTE_SOURCE_POINTER, action, x, y, 0, 0, 0);
+			if (action == 2 || action == 3) {
+				_last_pointer_sequence = sequenceId;
+				_active_pointer_sequence = 0;
+				_active_pointer_id = -1;
+			}
+			return true;
+		}
+	}
+
+	private boolean isInsideActiveCrop(int x, int y) {
+		int left = Math.max(0, Math.min(_mirror_source_width - 1,
+			(int)Math.floor(_active_crop_left * _mirror_source_width)));
+		int top = Math.max(0, Math.min(_mirror_source_height - 1,
+			Math.round(_active_crop_top * _mirror_source_height)));
+		int right = Math.max(left + 1, Math.min(_mirror_source_width,
+			(int)Math.ceil(_active_crop_right * _mirror_source_width)));
+		int bottom = Math.max(top + 1, Math.min(_mirror_source_height,
+			(int)Math.ceil(_active_crop_bottom * _mirror_source_height)));
+		return x >= left && x < right && y >= top && y < bottom;
+	}
+
+	private void resetAbsoluteSourcePointerLocked() {
+		_active_pointer_sequence = 0;
+		_active_pointer_id = -1;
+	}
+
+	@SuppressWarnings("unused") @Keep
 	final protected boolean makeMirrorSurfaceCurrent() {
 		String currentBefore = _mirror_diagnostic_frames_remaining > 0 ? currentEglSurfaces() : "not-sampled";
 		boolean result = _egl_mirror_surface != EGL10.EGL_NO_SURFACE &&
@@ -452,6 +715,12 @@ public abstract class ScummVM implements SurfaceHolder.Callback,
 	final protected void reportMirrorStatus(int status, long generation, String diagnostic) {
 		if (generation == _mirror_surface_generation)
 			MirrorSurfaceProtocol.sendStatus(_mirror_status_recipient, status, generation, diagnostic);
+	}
+
+	@SuppressWarnings("unused") @Keep
+	final protected void reportMirrorCursor(int x, int y, boolean visible, long geometryGeneration) {
+		MirrorSurfaceProtocol.sendCursorPosition(_mirror_status_recipient, x, y, visible,
+			geometryGeneration);
 	}
 
 	@SuppressWarnings("unused") @Keep
@@ -585,6 +854,66 @@ public abstract class ScummVM implements SurfaceHolder.Callback,
 
 		static MirrorSurfaceRequest detach(long generation, Messenger statusRecipient) {
 			return new MirrorSurfaceRequest(false, null, generation, 0, 0, statusRecipient);
+		}
+	}
+
+	private static final class MirrorCropRequest {
+		final float left;
+		final float top;
+		final float right;
+		final float bottom;
+		final long cropGeneration;
+		final long expectedGeometryGeneration;
+		final Messenger recipient;
+
+		MirrorCropRequest(float left, float top, float right, float bottom,
+				long cropGeneration, long expectedGeometryGeneration, Messenger recipient) {
+			this.left = left;
+			this.top = top;
+			this.right = right;
+			this.bottom = bottom;
+			this.cropGeneration = cropGeneration;
+			this.expectedGeometryGeneration = expectedGeometryGeneration;
+			this.recipient = recipient;
+		}
+
+		static MirrorCropRequest fallback() {
+			return new MirrorCropRequest(0.0f, 0.0f, 1.0f, 1.0f, 0, 0, null);
+		}
+
+		double[] toArray(long geometryGeneration) {
+			return new double[] { cropGeneration, geometryGeneration, left, top, right, bottom };
+		}
+	}
+
+	private static final class UpperPresentationRequest {
+		final int mode;
+		final float left;
+		final float top;
+		final float right;
+		final float bottom;
+		final long modeGeneration;
+		final long expectedGeometryGeneration;
+		final Messenger recipient;
+
+		UpperPresentationRequest(int mode, float left, float top, float right, float bottom,
+				long modeGeneration, long expectedGeometryGeneration, Messenger recipient) {
+			this.mode = mode;
+			this.left = left;
+			this.top = top;
+			this.right = right;
+			this.bottom = bottom;
+			this.modeGeneration = modeGeneration;
+			this.expectedGeometryGeneration = expectedGeometryGeneration;
+			this.recipient = recipient;
+		}
+
+		static UpperPresentationRequest fullFrame() {
+			return new UpperPresentationRequest(0, 0.0f, 0.0f, 1.0f, 1.0f, 0, 0, null);
+		}
+
+		double[] toArray(long geometryGeneration) {
+			return new double[] { mode, modeGeneration, geometryGeneration, left, top, right, bottom };
 		}
 	}
 

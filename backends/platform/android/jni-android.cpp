@@ -117,7 +117,13 @@ jmethodID JNI::_MID_makeMirrorSurfaceCurrent = 0;
 jmethodID JNI::_MID_makePrimarySurfaceCurrent = 0;
 jmethodID JNI::_MID_swapMirrorSurface = 0;
 jmethodID JNI::_MID_reportMirrorStatus = 0;
+jmethodID JNI::_MID_reportMirrorCursor = 0;
 jmethodID JNI::_MID_failMirrorSurface = 0;
+jmethodID JNI::_MID_reportMirrorSourceGeometry = 0;
+jmethodID JNI::_MID_updateMirrorCrop = 0;
+jmethodID JNI::_MID_reportMirrorCropAck = 0;
+jmethodID JNI::_MID_updateUpperPresentation = 0;
+jmethodID JNI::_MID_reportUpperPresentationAck = 0;
 jmethodID JNI::_MID_eglVersion = 0;
 jmethodID JNI::_MID_getNewSAFTree = 0;
 jmethodID JNI::_MID_getSAFTrees = 0;
@@ -786,6 +792,17 @@ void JNI::reportMirrorStatus(int status, const char *diagnostic) {
 	}
 }
 
+void JNI::reportMirrorCursor(int x, int y, bool visible, int64 geometryGeneration) {
+	JNIEnv *env = JNI::getEnv();
+	env->CallVoidMethod(_jobj, _MID_reportMirrorCursor, x, y,
+			visible ? JNI_TRUE : JNI_FALSE, (jlong)geometryGeneration);
+	if (env->ExceptionCheck()) {
+		LOGE("reportMirrorCursor failed");
+		env->ExceptionDescribe();
+		env->ExceptionClear();
+	}
+}
+
 bool JNI::failMirrorSurface(const char *diagnostic) {
 	JNIEnv *env = JNI::getEnv();
 	jstring javaDiagnostic = env->NewStringUTF(diagnostic);
@@ -801,6 +818,99 @@ bool JNI::failMirrorSurface(const char *diagnostic) {
 	_mirror_surface_width = 0;
 	_mirror_surface_height = 0;
 	return primaryRestored;
+}
+
+int64 JNI::reportMirrorSourceGeometry(int width, int height, int capability, int orientation) {
+	JNIEnv *env = JNI::getEnv();
+	const int64 generation = env->CallLongMethod(_jobj, _MID_reportMirrorSourceGeometry,
+			width, height, capability, orientation);
+	if (env->ExceptionCheck()) {
+		env->ExceptionDescribe();
+		env->ExceptionClear();
+		return 0;
+	}
+	return generation;
+}
+
+bool JNI::updateMirrorCrop(int64 &cropGeneration, int64 &geometryGeneration,
+		float &left, float &top, float &right, float &bottom) {
+	JNIEnv *env = JNI::getEnv();
+	jdoubleArray update = (jdoubleArray)env->CallObjectMethod(_jobj, _MID_updateMirrorCrop);
+	if (env->ExceptionCheck()) {
+		env->ExceptionDescribe();
+		env->ExceptionClear();
+		return false;
+	}
+	if (!update)
+		return false;
+	jdouble values[6] = { 0, 0, 0, 0, 1, 1 };
+	const bool validLength = env->GetArrayLength(update) == ARRAYSIZE(values);
+	if (validLength)
+		env->GetDoubleArrayRegion(update, 0, ARRAYSIZE(values), values);
+	env->DeleteLocalRef(update);
+	if (!validLength)
+		return false;
+	cropGeneration = (int64)values[0];
+	geometryGeneration = (int64)values[1];
+	left = (float)values[2];
+	top = (float)values[3];
+	right = (float)values[4];
+	bottom = (float)values[5];
+	return true;
+}
+
+void JNI::reportMirrorCropAck(int result, int64 cropGeneration,
+		int64 geometryGeneration, const char *diagnostic) {
+	JNIEnv *env = JNI::getEnv();
+	jstring javaDiagnostic = env->NewStringUTF(diagnostic);
+	env->CallVoidMethod(_jobj, _MID_reportMirrorCropAck, result,
+			(jlong)cropGeneration, (jlong)geometryGeneration, javaDiagnostic);
+	env->DeleteLocalRef(javaDiagnostic);
+	if (env->ExceptionCheck()) {
+		env->ExceptionDescribe();
+		env->ExceptionClear();
+	}
+}
+
+bool JNI::updateUpperPresentation(int &mode, int64 &modeGeneration,
+		int64 &geometryGeneration, float &left, float &top, float &right, float &bottom) {
+	JNIEnv *env = JNI::getEnv();
+	jdoubleArray update = (jdoubleArray)env->CallObjectMethod(_jobj, _MID_updateUpperPresentation);
+	if (env->ExceptionCheck()) {
+		env->ExceptionDescribe();
+		env->ExceptionClear();
+		return false;
+	}
+	if (!update)
+		return false;
+	jdouble values[7] = { 0, 0, 0, 0, 0, 1, 1 };
+	const bool validLength = env->GetArrayLength(update) == ARRAYSIZE(values);
+	if (validLength)
+		env->GetDoubleArrayRegion(update, 0, ARRAYSIZE(values), values);
+	env->DeleteLocalRef(update);
+	if (!validLength)
+		return false;
+	mode = (int)values[0];
+	modeGeneration = (int64)values[1];
+	geometryGeneration = (int64)values[2];
+	left = (float)values[3];
+	top = (float)values[4];
+	right = (float)values[5];
+	bottom = (float)values[6];
+	return true;
+}
+
+void JNI::reportUpperPresentationAck(int result, int64 modeGeneration,
+		int64 geometryGeneration, const char *diagnostic) {
+	JNIEnv *env = JNI::getEnv();
+	jstring javaDiagnostic = env->NewStringUTF(diagnostic);
+	env->CallVoidMethod(_jobj, _MID_reportUpperPresentationAck, result,
+			(jlong)modeGeneration, (jlong)geometryGeneration, javaDiagnostic);
+	env->DeleteLocalRef(javaDiagnostic);
+	if (env->ExceptionCheck()) {
+		env->ExceptionDescribe();
+		env->ExceptionClear();
+	}
 }
 
 int JNI::fetchEGLVersion() {
@@ -874,7 +984,13 @@ void JNI::create(JNIEnv *env, jobject self, jobject asset_manager,
 	FIND_METHOD(, makePrimarySurfaceCurrent, "()Z");
 	FIND_METHOD(, swapMirrorSurface, "()Z");
 	FIND_METHOD(, reportMirrorStatus, "(IJLjava/lang/String;)V");
+	FIND_METHOD(, reportMirrorCursor, "(IIZJ)V");
 	FIND_METHOD(, failMirrorSurface, "(JLjava/lang/String;)Z");
+	FIND_METHOD(, reportMirrorSourceGeometry, "(IIII)J");
+	FIND_METHOD(, updateMirrorCrop, "()[D");
+	FIND_METHOD(, reportMirrorCropAck, "(IJJLjava/lang/String;)V");
+	FIND_METHOD(, updateUpperPresentation, "()[D");
+	FIND_METHOD(, reportUpperPresentationAck, "(IJJLjava/lang/String;)V");
 	FIND_METHOD(, eglVersion, "()I");
 	FIND_METHOD(, getNewSAFTree,
 	            "(ZLjava/lang/String;Ljava/lang/String;)Lorg/scummvm/scummvm/SAFFSTree;");

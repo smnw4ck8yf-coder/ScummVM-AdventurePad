@@ -104,6 +104,16 @@ public:
 		drawTextureInternal(texture, coordinates, texture.getTexCoords());
 	}
 
+	inline void drawTextureNormalizedCrop(const Texture &texture, GLfloat x, GLfloat y,
+			GLfloat w, GLfloat h, GLfloat left, GLfloat top, GLfloat right, GLfloat bottom) {
+		const GLfloat coordinates[4*2] = {
+			x, y, x + w, y, x, y + h, x + w, y + h
+		};
+		GLfloat texcoords[4*2];
+		texture.getTexCoordsForNormalizedRect(left, top, right, bottom, texcoords);
+		drawTextureInternal(texture, coordinates, texcoords);
+	}
+
 	inline void drawTexture(const Texture &texture, GLfloat x, GLfloat y, GLfloat w, GLfloat h, const Common::Rect &clip) {
 		const GLfloat coordinates[4*2] = {
 			x,     y,

@@ -39,8 +39,18 @@ public final class RelativeInputService extends Service {
 	private static final int JOYSTICK_TRIGGER_FLAGS = 0x40 | 0x80;
 	private static final int JOYSTICK_VALID_FLAGS = 0xff;
 	private static final int MAX_MIRROR_DIMENSION = 8192;
+	private static final float MIN_NORMALIZED_CROP_DIMENSION = 0.05f;
 
 	private static volatile ScummVM _nativeEventSink;
+	private static volatile String _currentGameTarget = "";
+
+	static void setCurrentGameTarget(String target) {
+		_currentGameTarget = target == null ? "" : target;
+	}
+
+	static String getCurrentGameTarget() {
+		return _currentGameTarget;
+	}
 
 	private double _fractionalResidualX;
 	private double _fractionalResidualY;
@@ -50,6 +60,8 @@ public final class RelativeInputService extends Service {
 	private boolean _rightButtonDown;
 	private long _latestMirrorGeneration;
 	private long _activeMirrorGeneration;
+	private long _latestCropGeneration;
+	private long _latestModeGeneration;
 	private final Messenger _messenger = new Messenger(new IncomingHandler(Looper.getMainLooper()));
 
 	static void attachNativeEventSink(ScummVM sink) {
@@ -117,6 +129,18 @@ public final class RelativeInputService extends Service {
 			case MirrorSurfaceProtocol.MSG_DETACH_SURFACE:
 				detachMirrorSurface(message);
 				return;
+			case MirrorSurfaceProtocol.MSG_QUERY_GEOMETRY:
+				queryMirrorGeometry(message);
+				return;
+			case MirrorSurfaceProtocol.MSG_APPLY_CROP:
+				applyMirrorCrop(message);
+				return;
+			case MirrorSurfaceProtocol.MSG_APPLY_DISPLAY_MODE:
+				applyDisplayMode(message);
+				return;
+			case MirrorSurfaceProtocol.MSG_ABSOLUTE_SOURCE_POINTER:
+				forwardAbsoluteSourcePointer(message);
+				return;
 			default:
 				Log.w(TAG, "Rejected unknown Messenger message type " + message.what);
 			}
@@ -181,6 +205,119 @@ public final class RelativeInputService extends Service {
 			if (width <= 0 || height <= 0 || width > MAX_MIRROR_DIMENSION || height > MAX_MIRROR_DIMENSION)
 				return "Surface dimensions are outside the accepted bounds";
 			return null;
+		}
+
+		private void queryMirrorGeometry(Message message) {
+			ScummVM sink = _nativeEventSink;
+			if (sink == null || !sink.isMirrorOutputEnabled()) {
+				MirrorSurfaceProtocol.sendGeometry(message.replyTo, 0, 0, 0, 0, getCurrentGameTarget(), 0);
+				return;
+			}
+			sink.queueMirrorGeometryQuery(message.replyTo);
+		}
+
+		private void applyMirrorCrop(Message message) {
+			Bundle data = message.getData();
+			float left = data.getFloat(MirrorSurfaceProtocol.KEY_LEFT, Float.NaN);
+			float top = data.getFloat(MirrorSurfaceProtocol.KEY_TOP, Float.NaN);
+			float right = data.getFloat(MirrorSurfaceProtocol.KEY_RIGHT, Float.NaN);
+			float bottom = data.getFloat(MirrorSurfaceProtocol.KEY_BOTTOM, Float.NaN);
+			long cropGeneration = data.getLong(MirrorSurfaceProtocol.KEY_CROP_GENERATION, 0);
+			long expectedGeometryGeneration = data.getLong(
+				MirrorSurfaceProtocol.KEY_EXPECTED_GEOMETRY_GENERATION, 0);
+			ScummVM sink = _nativeEventSink;
+			int rejection = 0;
+			String diagnostic = null;
+			if (cropGeneration <= _latestCropGeneration) {
+				rejection = MirrorSurfaceProtocol.CROP_STALE_GENERATION;
+				diagnostic = "Crop generation is stale";
+			} else if (!isValidCrop(left, top, right, bottom)) {
+				rejection = MirrorSurfaceProtocol.CROP_INVALID_RECTANGLE;
+				diagnostic = "Crop rectangle is invalid or below the safe minimum";
+			} else if (sink == null || !sink.isMirrorOutputEnabled()) {
+				rejection = MirrorSurfaceProtocol.CROP_UNSUPPORTED_SOURCE;
+				diagnostic = "Mirror source is unavailable";
+			}
+			if (rejection != 0) {
+				if (sink != null)
+					sink.queueMirrorCropFallback();
+				MirrorSurfaceProtocol.sendCropAck(message.replyTo, rejection, cropGeneration,
+					expectedGeometryGeneration, diagnostic);
+				return;
+			}
+			_latestCropGeneration = cropGeneration;
+			sink.queueMirrorCrop(left, top, right, bottom, cropGeneration,
+				expectedGeometryGeneration, message.replyTo);
+		}
+
+		private boolean isValidCrop(float left, float top, float right, float bottom) {
+			final float edgeTolerance = 0.0001f;
+			final boolean validRectangle = Float.isFinite(left) && Float.isFinite(top) && Float.isFinite(right) &&
+				Float.isFinite(bottom) && left >= 0.0f && top >= 0.0f && right <= 1.0f &&
+				bottom <= 1.0f && left < right && top < bottom &&
+				right - left >= MIN_NORMALIZED_CROP_DIMENSION &&
+				bottom - top >= MIN_NORMALIZED_CROP_DIMENSION;
+			if (!validRectangle)
+				return false;
+			final boolean fullFrame = left <= edgeTolerance && top <= edgeTolerance &&
+				right >= 1.0f - edgeTolerance && bottom >= 1.0f - edgeTolerance;
+			final boolean lowerSplitRegion = left <= edgeTolerance && right >= 1.0f - edgeTolerance &&
+				bottom >= 1.0f - edgeTolerance;
+			return fullFrame || lowerSplitRegion;
+		}
+
+		private void applyDisplayMode(Message message) {
+			Bundle data = message.getData();
+			int mode = data.getInt(MirrorSurfaceProtocol.KEY_DISPLAY_MODE, -1);
+			long modeGeneration = data.getLong(MirrorSurfaceProtocol.KEY_MODE_GENERATION, 0);
+			long expectedGeometryGeneration = data.getLong(
+				MirrorSurfaceProtocol.KEY_EXPECTED_GEOMETRY_GENERATION, 0);
+			float left = data.getFloat(MirrorSurfaceProtocol.KEY_LEFT, Float.NaN);
+			float top = data.getFloat(MirrorSurfaceProtocol.KEY_TOP, Float.NaN);
+			float right = data.getFloat(MirrorSurfaceProtocol.KEY_RIGHT, Float.NaN);
+			float bottom = data.getFloat(MirrorSurfaceProtocol.KEY_BOTTOM, Float.NaN);
+			ScummVM sink = _nativeEventSink;
+			int rejection = 0;
+			String diagnostic = null;
+			if (modeGeneration <= _latestModeGeneration) {
+				rejection = MirrorSurfaceProtocol.MODE_STALE_GENERATION;
+				diagnostic = "Display mode generation is stale";
+			} else if ((mode != 0 && mode != 1) || !isValidCrop(left, top, right, bottom)) {
+				rejection = MirrorSurfaceProtocol.MODE_INVALID_CROP;
+				diagnostic = "Display mode or crop rectangle is invalid";
+			} else if (sink == null || !sink.isMirrorOutputEnabled()) {
+				rejection = MirrorSurfaceProtocol.MODE_UNSUPPORTED_RENDERER;
+				diagnostic = "Crop-capable renderer is unavailable";
+			}
+			if (rejection != 0) {
+				if (sink != null)
+					sink.queueUpperPresentationFallback();
+				MirrorSurfaceProtocol.sendDisplayModeAck(message.replyTo, rejection,
+					modeGeneration, expectedGeometryGeneration, diagnostic);
+				return;
+			}
+			_latestModeGeneration = modeGeneration;
+			sink.queueUpperPresentation(mode, left, top, right, bottom, modeGeneration,
+				expectedGeometryGeneration, message.replyTo);
+		}
+
+		private void forwardAbsoluteSourcePointer(Message message) {
+			Bundle data = message.getData();
+			int x = data.getInt(MirrorSurfaceProtocol.KEY_SOURCE_X, -1);
+			int y = data.getInt(MirrorSurfaceProtocol.KEY_SOURCE_Y, -1);
+			int action = data.getInt(MirrorSurfaceProtocol.KEY_POINTER_ACTION, -1);
+			int pointerId = data.getInt(MirrorSurfaceProtocol.KEY_POINTER_ID, -1);
+			long sequenceId = data.getLong(MirrorSurfaceProtocol.KEY_POINTER_SEQUENCE_ID, 0);
+			long cropGeneration = data.getLong(MirrorSurfaceProtocol.KEY_CROP_GENERATION, 0);
+			long geometryGeneration = data.getLong(
+				MirrorSurfaceProtocol.KEY_EXPECTED_GEOMETRY_GENERATION, 0);
+			ScummVM sink = _nativeEventSink;
+			if (sink == null || !sink.pushAbsoluteSourcePointer(x, y, action, pointerId,
+				sequenceId, cropGeneration, geometryGeneration)) {
+				Log.w(TAG, "Rejected absolute-source pointer action=" + action +
+					" sequence=" + sequenceId + " cropGeneration=" + cropGeneration +
+					" geometryGeneration=" + geometryGeneration);
+			}
 		}
 
 		@SuppressWarnings("deprecation")

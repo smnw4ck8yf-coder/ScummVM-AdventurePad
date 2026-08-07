@@ -39,6 +39,7 @@
 #include "backends/platform/android/android.h"
 #include "backends/platform/android/jni-android.h"
 #include "backends/graphics/android/android-graphics.h"
+#include "backends/graphics/android/upper-presentation.h"
 #include "backends/graphics/opengl/pipelines/pipeline.h"
 #include "backends/graphics/opengl/renderer3d.h"
 #include "backends/graphics/opengl/texture.h"
@@ -47,7 +48,18 @@
 #include "graphics/managed_surface.h"
 #include "graphics/opengl/debug.h"
 
+#include <cmath>
+
 namespace {
+
+int mirrorOrientation(Common::RotationMode rotation) {
+	switch (rotation) {
+	case Common::kRotation90: return 1;
+	case Common::kRotation180: return 2;
+	case Common::kRotation270: return 3;
+	default: return 0;
+	}
+}
 
 void logMirrorGLState(const char *stage) {
 	GLint framebuffer = 0;
@@ -96,6 +108,35 @@ AndroidGraphicsManager::AndroidGraphicsManager() :
 	_mirrorGeneration(0),
 	_mirrorSourceState(-1),
 	_mirrorDiagnosticFramesRemaining(0),
+	_mirrorSourceWidth(0),
+	_mirrorSourceHeight(0),
+	_mirrorSourceOrientation(0),
+	_mirrorGeometryGeneration(0),
+	_mirrorCropLeft(0.0f),
+	_mirrorCropTop(0.0f),
+	_mirrorCropRight(1.0f),
+	_mirrorCropBottom(1.0f),
+	_pendingCropAckGeneration(0),
+	_pendingCropAckGeometryGeneration(0),
+	_upperPresentationExpanded(false),
+	_upperGameplayLeft(0.0f),
+	_upperGameplayTop(0.0f),
+	_upperGameplayRight(1.0f),
+	_upperGameplayBottom(1.0f),
+	_pendingModeAckGeneration(0),
+	_pendingModeAckGeometryGeneration(0),
+	_pendingModeAckResult(0),
+	_reportedMirrorCursorX(-1),
+	_reportedMirrorCursorY(-1),
+	_reportedMirrorCursorVisible(false),
+	_reportedMirrorCursorGeometryGeneration(0),
+	_mirrorRenderLogCount(0),
+	_mirrorRefreshEventCount(0),
+	_mirrorRefreshFramePending(false),
+	_mirrorCursorFramePending(false),
+	_awaitingFirstMirrorCursorMovement(false),
+	_mirrorTextureTraceSequence(0),
+	_mirrorTextureTraceLogCount(0),
 	_old_touch_mode(OSystem_Android::TOUCH_MODE_TOUCHPAD) {
 	ENTER();
 
@@ -196,15 +237,277 @@ void AndroidGraphicsManager::updateScreen() {
 	if (!JNI::haveSurface())
 		return;
 
+	const bool traceScheduledFrame = _mirrorRefreshFramePending || _mirrorCursorFramePending;
+	if (traceScheduledFrame) {
+		logMirrorRenderTransition("updateScreen entered");
+		logMirrorTextureLifecycle(_mirrorCursorFramePending ?
+				"sequence-B update entered after first movement" :
+				"sequence-A update entered after mirror activation");
+	}
+
 	// Attach and detach requests arrive on Android's main thread, but EGL
 	// lifecycle work is consumed here on ScummVM's render thread.
 	JNI::updateMirrorSurface();
+	updateMirrorSourceGeometry();
+	updateUpperPresentation();
 
 	// Sets _forceRedraw if needed
 	dynamic_cast<OSystem_Android *>(g_system)->getTouchControls().beforeDraw();
 
+	if (traceScheduledFrame)
+		logMirrorTextureLifecycle("before primary updateScreen");
 	OpenGLGraphicsManager::updateScreen();
+	if (traceScheduledFrame) {
+		logMirrorRenderTransition("primary frame returned");
+		logMirrorTextureLifecycle("after primary updateScreen");
+	}
+	if (_pendingModeAckGeneration > 0) {
+		const char *diagnostic = _pendingModeAckResult == 1 ? "Full-frame upper presentation applied" :
+			_pendingModeAckResult == 2 ? "Expanded upper presentation applied" :
+			_pendingModeAckResult == 3 ? "Crop shape cannot expand upper presentation" :
+			_pendingModeAckResult == 6 ? "Renderer rotation cannot safely expand upper presentation" :
+			"Upper presentation crop is invalid";
+		JNI::reportUpperPresentationAck(_pendingModeAckResult, _pendingModeAckGeneration,
+				_pendingModeAckGeometryGeneration, diagnostic);
+		_pendingModeAckGeneration = 0;
+		_pendingModeAckResult = 0;
+	}
 	renderMirrorSurface();
+	if (traceScheduledFrame) {
+		logMirrorTextureLifecycle("after mirror render");
+		logMirrorRenderTransition(_mirrorSourceState == 1 ?
+				"mirror frame presented" : "mirror frame did not reach supported state");
+		_mirrorRefreshFramePending = false;
+		_mirrorCursorFramePending = false;
+	}
+}
+
+void AndroidGraphicsManager::handleMirrorLifecycleChange() {
+	++_mirrorRefreshEventCount;
+	++_mirrorTextureTraceSequence;
+	_mirrorRefreshFramePending = true;
+	_awaitingFirstMirrorCursorMovement = true;
+	logMirrorRenderTransition("JE_MIRROR_REFRESH consumed; forcing one frame");
+	logMirrorTextureLifecycle("sequence-A mirror lifecycle event");
+	_forceRedraw = true;
+	updateScreen();
+}
+
+void AndroidGraphicsManager::logMirrorRenderTransition(const char *stage) {
+	if (_mirrorRenderLogCount >= 64)
+		return;
+	++_mirrorRenderLogCount;
+	const int gameDirty = _gameScreen ? (_gameScreen->isDirty() ? 1 : 0) : -1;
+	LOGI("AdventurePadMirrorRender event=%d/64 stage=%s refreshEvents=%d refreshPending=%d cursorPending=%d havePrimary=%d haveMirror=%d forceRedraw=%d cursorNeedsRedraw=%d gameDirty=%d mirrorGeneration=%lld mirrorState=%d",
+			_mirrorRenderLogCount, stage, _mirrorRefreshEventCount,
+			_mirrorRefreshFramePending, _mirrorCursorFramePending,
+			JNI::haveSurface(), JNI::haveMirrorSurface(), _forceRedraw,
+			_cursorNeedsRedraw, gameDirty, (long long)_mirrorGeneration, _mirrorSourceState);
+}
+
+void AndroidGraphicsManager::logMirrorTextureLifecycle(const char *stage) {
+	if (_mirrorTextureTraceLogCount >= 96)
+		return;
+	++_mirrorTextureTraceLogCount;
+
+	const OpenGL::Surface *sourceSurface = _gameScreen;
+	const OpenGL::Texture *sourceTexture = sourceSurface ? &sourceSurface->getGLTexture() : nullptr;
+#if defined(USE_OPENGL_GAME) || defined(USE_OPENGL_SHADERS)
+	const char *sourceKind = sourceSurface ? "gameScreen" :
+		(_renderer3d && _renderer3d->hasTexture() ? "renderer3d" : "none");
+	if (!sourceTexture && _renderer3d && _renderer3d->hasTexture())
+		sourceTexture = &_renderer3d->getGLTexture();
+#else
+	const char *sourceKind = sourceSurface ? "gameScreen" : "none";
+#endif
+	const OpenGL::Texture *cursorTexture = _cursor ? &_cursor->getGLTexture() : nullptr;
+	const Common::Rect dirtyArea = sourceSurface ?
+		sourceSurface->getDirtyAreaForDiagnostics() : Common::Rect();
+	const Common::Rect sourceUpload = sourceTexture ?
+		sourceTexture->getLastUploadArea() : Common::Rect();
+	const Common::Rect cursorUpload = cursorTexture ?
+		cursorTexture->getLastUploadArea() : Common::Rect();
+	GLint framebuffer = 0;
+	GLint activeTexture = 0;
+	GLint boundTexture = 0;
+	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &framebuffer);
+	glGetIntegerv(GL_ACTIVE_TEXTURE, &activeTexture);
+	glGetIntegerv(GL_TEXTURE_BINDING_2D, &boundTexture);
+
+	LOGI("AdventurePadTextureLifecycle event=%d/96 sequence=%d stage=%s source=%s surface=%p texture=%p id=%u logical=%ux%u allocated=%ux%u dirty=%d dirtyArea=%d,%d-%d,%d mutationGen=%u cleanGen=%u paletteGen=%u palettePending=%d gpuGenerated=%d sourceReady=%d inputTexSubImageGen=%u paletteTexSubImageGen=%u framebufferGen=%u framebufferOK=%d framebufferStorageGen=%u nameGen=%u storageGen=%u storageOK=%d texSubImageGen=%u uploadOK=%d uploadedStorageGen=%u lastUpload=%d,%d-%d,%d framebuffer=%d activeTexture=0x%x boundTexture=%d forceRedraw=%d cursorNeedsRedraw=%d cursorId=%u cursorDirty=%d cursorMutationGen=%u cursorCleanGen=%u cursorNameGen=%u cursorStorageGen=%u cursorStorageOK=%d cursorTexSubImageGen=%u cursorUploadOK=%d cursorUploadedStorageGen=%u cursorLastUpload=%d,%d-%d,%d",
+			_mirrorTextureTraceLogCount, _mirrorTextureTraceSequence, stage, sourceKind,
+			(const void *)sourceSurface, (const void *)sourceTexture,
+			sourceTexture ? sourceTexture->getGLTexture() : 0,
+			sourceTexture ? sourceTexture->getLogicalWidth() : 0,
+			sourceTexture ? sourceTexture->getLogicalHeight() : 0,
+			sourceTexture ? sourceTexture->getWidth() : 0,
+			sourceTexture ? sourceTexture->getHeight() : 0,
+			sourceSurface ? sourceSurface->isDirty() : 0,
+			dirtyArea.left, dirtyArea.top, dirtyArea.right, dirtyArea.bottom,
+			sourceSurface ? sourceSurface->getMutationGeneration() : 0,
+			sourceSurface ? sourceSurface->getCleanGeneration() : 0,
+			sourceSurface ? sourceSurface->getPaletteGeneration() : 0,
+			sourceSurface ? sourceSurface->isPaletteUploadPending() : 0,
+			sourceSurface ? sourceSurface->isGPUGeneratedSource() : 0,
+			sourceSurface ? sourceSurface->isSourceDataReady() : 0,
+			sourceSurface ? sourceSurface->getInputUploadGeneration() : 0,
+			sourceSurface ? sourceSurface->getPaletteUploadGeneration() : 0,
+			sourceSurface ? sourceSurface->getFramebufferGeneration() : 0,
+			sourceSurface ? sourceSurface->wasLastFramebufferGenerationSuccessful() : 0,
+			sourceSurface ? sourceSurface->getFramebufferStorageGeneration() : 0,
+			sourceTexture ? sourceTexture->getNameGeneration() : 0,
+			sourceTexture ? sourceTexture->getStorageGeneration() : 0,
+			sourceTexture ? sourceTexture->wasLastStorageSuccessful() : 0,
+			sourceTexture ? sourceTexture->getUploadGeneration() : 0,
+			sourceTexture ? sourceTexture->wasLastUploadSuccessful() : 0,
+			sourceTexture ? sourceTexture->getUploadedStorageGeneration() : 0,
+			sourceUpload.left, sourceUpload.top, sourceUpload.right, sourceUpload.bottom,
+			framebuffer, activeTexture, boundTexture, _forceRedraw, _cursorNeedsRedraw,
+			cursorTexture ? cursorTexture->getGLTexture() : 0,
+			_cursor ? _cursor->isDirty() : 0,
+			_cursor ? _cursor->getMutationGeneration() : 0,
+			_cursor ? _cursor->getCleanGeneration() : 0,
+			cursorTexture ? cursorTexture->getNameGeneration() : 0,
+			cursorTexture ? cursorTexture->getStorageGeneration() : 0,
+			cursorTexture ? cursorTexture->wasLastStorageSuccessful() : 0,
+			cursorTexture ? cursorTexture->getUploadGeneration() : 0,
+			cursorTexture ? cursorTexture->wasLastUploadSuccessful() : 0,
+			cursorTexture ? cursorTexture->getUploadedStorageGeneration() : 0,
+			cursorUpload.left, cursorUpload.top, cursorUpload.right, cursorUpload.bottom);
+}
+
+void AndroidGraphicsManager::updateMirrorSourceGeometry() {
+	int sourceWidth = 0;
+	int sourceHeight = 0;
+	int capability = 0;
+	if (_gameScreen) {
+		sourceWidth = _gameScreen->getGLTexture().getLogicalWidth();
+		sourceHeight = _gameScreen->getGLTexture().getLogicalHeight();
+		capability = sourceWidth > 0 && sourceHeight >= 4 ? 1 : 0;
+	}
+#if defined(USE_OPENGL_GAME) || defined(USE_OPENGL_SHADERS)
+	else if (_renderer3d && _renderer3d->hasTexture()) {
+		sourceWidth = _renderer3d->getGLTexture().getLogicalWidth();
+		sourceHeight = _renderer3d->getGLTexture().getLogicalHeight();
+		capability = sourceWidth > 0 && sourceHeight >= 4 ? 1 : 0;
+	}
+#endif
+	if (!capability) {
+		sourceWidth = 0;
+		sourceHeight = 0;
+	}
+	const int orientation = mirrorOrientation(_rotationMode);
+	if (_mirrorSourceWidth == sourceWidth && _mirrorSourceHeight == sourceHeight &&
+			_mirrorSourceOrientation == orientation)
+		return;
+	_mirrorSourceWidth = sourceWidth;
+	_mirrorSourceHeight = sourceHeight;
+	_mirrorSourceOrientation = orientation;
+	_mirrorGeometryGeneration = JNI::reportMirrorSourceGeometry(sourceWidth, sourceHeight, capability,
+			orientation);
+	_mirrorCropLeft = _mirrorCropTop = 0.0f;
+	_mirrorCropRight = _mirrorCropBottom = 1.0f;
+	_upperPresentationExpanded = false;
+	_forceRedraw = true;
+}
+
+void AndroidGraphicsManager::updateUpperPresentation() {
+	if (!JNI::haveMirrorSurface() && _upperPresentationExpanded) {
+		_upperPresentationExpanded = false;
+		_forceRedraw = true;
+	}
+
+	int mode = 0;
+	int64 modeGeneration = 0;
+	int64 geometryGeneration = 0;
+	float left = 0.0f, top = 0.0f, right = 1.0f, bottom = 1.0f;
+	if (!JNI::updateUpperPresentation(mode, modeGeneration, geometryGeneration,
+			left, top, right, bottom))
+		return;
+
+	int result = 1;
+	AndroidUpperPresentationCrop gameplay = { 0.0f, 0.0f, 1.0f, 1.0f };
+	if (mode == 1) {
+		if (_rotationMode != Common::kRotationNormal) {
+			result = 6;
+		} else if (_mirrorSourceWidth <= 0 || _mirrorSourceHeight <= 0 ||
+			(modeGeneration > 0 && geometryGeneration != _mirrorGeometryGeneration)) {
+			result = kUpperPresentationInvalidCrop;
+		} else {
+			result = deriveAndroidUpperGameplayCrop(left, top, right, bottom, gameplay);
+		}
+	}
+
+	_upperPresentationExpanded = result == kUpperPresentationExpanded;
+	if (_upperPresentationExpanded) {
+		_upperGameplayLeft = gameplay.left;
+		_upperGameplayTop = gameplay.top;
+		_upperGameplayRight = gameplay.right;
+		_upperGameplayBottom = gameplay.bottom;
+	} else {
+		_upperGameplayLeft = _upperGameplayTop = 0.0f;
+		_upperGameplayRight = _upperGameplayBottom = 1.0f;
+	}
+	_forceRedraw = true;
+	if (modeGeneration > 0) {
+		_pendingModeAckGeneration = modeGeneration;
+		_pendingModeAckGeometryGeneration = _mirrorGeometryGeneration;
+		_pendingModeAckResult = result;
+	}
+}
+
+Common::Rect AndroidGraphicsManager::getPresentationGameRect() const {
+	if (!_upperPresentationExpanded || _overlayVisible || _gameDrawRect.isEmpty())
+		return _gameDrawRect;
+	const float cropWidth = _upperGameplayRight - _upperGameplayLeft;
+	const float cropHeight = _upperGameplayBottom - _upperGameplayTop;
+	if (cropWidth <= 0.0f || cropHeight <= 0.0f || _windowWidth <= 0 || _windowHeight <= 0)
+		return _gameDrawRect;
+	const float originalAspect = (float)_gameDrawRect.width() / _gameDrawRect.height();
+	const float gameplayAspect = originalAspect * cropWidth / cropHeight;
+	int width = _windowWidth;
+	int height = MAX(1, (int)(width / gameplayAspect));
+	if (height > _windowHeight) {
+		height = _windowHeight;
+		width = MAX(1, (int)(height * gameplayAspect));
+	}
+	const int left = (_windowWidth - width) / 2;
+	const int top = (_windowHeight - height) / 2;
+	return Common::Rect(left, top, left + width, top + height);
+}
+
+bool AndroidGraphicsManager::getPresentationTextureCrop(GLfloat &left, GLfloat &top,
+		GLfloat &right, GLfloat &bottom) const {
+	if (!_upperPresentationExpanded || _overlayVisible)
+		return false;
+	left = _upperGameplayLeft;
+	top = _upperGameplayTop;
+	right = _upperGameplayRight;
+	bottom = _upperGameplayBottom;
+	return true;
+}
+
+bool AndroidGraphicsManager::transformCursorForPresentation(GLfloat &x, GLfloat &y,
+		GLfloat &width, GLfloat &height) const {
+	if (!_upperPresentationExpanded || _overlayVisible)
+		return true;
+	if (_gameDrawRect.isEmpty())
+		return false;
+	const float hotspotX = ((float)_cursorX - _gameDrawRect.left) / _gameDrawRect.width();
+	const float hotspotY = ((float)_cursorY - _gameDrawRect.top) / _gameDrawRect.height();
+	if (hotspotX < _upperGameplayLeft || hotspotX > _upperGameplayRight ||
+		hotspotY < _upperGameplayTop || hotspotY >= _upperGameplayBottom)
+		return false;
+	const Common::Rect destination = getPresentationGameRect();
+	const float cropWidth = _upperGameplayRight - _upperGameplayLeft;
+	const float cropHeight = _upperGameplayBottom - _upperGameplayTop;
+	const float sourceX = (x - _gameDrawRect.left) / _gameDrawRect.width();
+	const float sourceY = (y - _gameDrawRect.top) / _gameDrawRect.height();
+	x = destination.left + (sourceX - _upperGameplayLeft) * destination.width() / cropWidth;
+	y = destination.top + (sourceY - _upperGameplayTop) * destination.height() / cropHeight;
+	width *= destination.width() / (_gameDrawRect.width() * cropWidth);
+	height *= destination.height() / (_gameDrawRect.height() * cropHeight);
+	return true;
 }
 
 void AndroidGraphicsManager::renderMirrorSurface() {
@@ -213,12 +516,15 @@ void AndroidGraphicsManager::renderMirrorSurface() {
 		_mirrorSourceState = -1;
 		return;
 	}
+	if (_mirrorRefreshFramePending || _mirrorCursorFramePending)
+		logMirrorRenderTransition("mirror draw entered");
 
 	const int64 generation = JNI::mirrorSurfaceGeneration();
 	if (_mirrorGeneration != generation) {
 		_mirrorGeneration = generation;
 		_mirrorSourceState = -1;
 		_mirrorDiagnosticFramesRemaining = 8;
+		_reportedMirrorCursorGeometryGeneration = 0;
 	}
 
 	const OpenGL::Texture *sourceTexture = nullptr;
@@ -230,26 +536,91 @@ void AndroidGraphicsManager::renderMirrorSurface() {
 		sourceTexture = &_renderer3d->getGLTexture();
 	}
 #endif
+	if (_mirrorRefreshFramePending || _mirrorCursorFramePending)
+		logMirrorTextureLifecycle("mirror source selected");
 
 	if (!sourceTexture || sourceTexture->getLogicalWidth() == 0 || sourceTexture->getLogicalHeight() < 4) {
+		if (_mirrorSourceWidth != 0 || _mirrorSourceHeight != 0) {
+			_mirrorSourceWidth = 0;
+			_mirrorSourceHeight = 0;
+			_mirrorSourceOrientation = mirrorOrientation(_rotationMode);
+			_mirrorGeometryGeneration = JNI::reportMirrorSourceGeometry(0, 0, 0,
+					mirrorOrientation(_rotationMode));
+			_mirrorCropLeft = _mirrorCropTop = 0.0f;
+			_mirrorCropRight = _mirrorCropBottom = 1.0f;
+		}
 		if (_mirrorSourceState != 0) {
 			JNI::reportMirrorStatus(2, "Current renderer has no reusable game texture");
 			_mirrorSourceState = 0;
 		}
 		return;
 	}
+
+	const int sourceWidth = sourceTexture->getLogicalWidth();
+	const int sourceHeight = sourceTexture->getLogicalHeight();
+	if (_mirrorSourceWidth != sourceWidth || _mirrorSourceHeight != sourceHeight) {
+		_mirrorSourceWidth = sourceWidth;
+		_mirrorSourceHeight = sourceHeight;
+		_mirrorSourceOrientation = mirrorOrientation(_rotationMode);
+		_mirrorGeometryGeneration = JNI::reportMirrorSourceGeometry(sourceWidth, sourceHeight, 1,
+				mirrorOrientation(_rotationMode));
+		_mirrorCropLeft = _mirrorCropTop = 0.0f;
+		_mirrorCropRight = _mirrorCropBottom = 1.0f;
+	}
+
+	int64 requestedCropGeneration = 0;
+	int64 requestedGeometryGeneration = 0;
+	float requestedLeft = 0.0f;
+	float requestedTop = 0.0f;
+	float requestedRight = 1.0f;
+	float requestedBottom = 1.0f;
+	if (JNI::updateMirrorCrop(requestedCropGeneration, requestedGeometryGeneration,
+			requestedLeft, requestedTop, requestedRight, requestedBottom)) {
+		const bool valid = std::isfinite(requestedLeft) && std::isfinite(requestedTop) &&
+			std::isfinite(requestedRight) && std::isfinite(requestedBottom) &&
+			requestedLeft >= 0.0f && requestedTop >= 0.0f && requestedRight <= 1.0f &&
+			requestedBottom <= 1.0f && requestedLeft < requestedRight &&
+			requestedTop < requestedBottom && requestedRight - requestedLeft >= 0.05f &&
+			requestedBottom - requestedTop >= 0.05f &&
+			(requestedCropGeneration == 0 || requestedGeometryGeneration == _mirrorGeometryGeneration);
+		if (valid) {
+			_mirrorCropLeft = requestedLeft;
+			_mirrorCropTop = requestedTop;
+			_mirrorCropRight = requestedRight;
+			_mirrorCropBottom = requestedBottom;
+			_pendingCropAckGeneration = requestedCropGeneration;
+			_pendingCropAckGeometryGeneration = requestedGeometryGeneration;
+		} else {
+			_mirrorCropLeft = _mirrorCropTop = 0.0f;
+			_mirrorCropRight = _mirrorCropBottom = 1.0f;
+			if (requestedCropGeneration > 0) {
+				JNI::reportMirrorCropAck(4, requestedCropGeneration, _mirrorGeometryGeneration,
+						"Native crop validation rejected the rectangle");
+			}
+			_pendingCropAckGeneration = 0;
+		}
+	}
 	if (_mirrorDiagnosticFramesRemaining > 0) {
 		const char *sourceType = _gameScreen ? "gameScreen" : "renderer3d";
 		const bool textureValid = glIsTexture(sourceTexture->getGLTexture()) == GL_TRUE;
-		const bool uploadComplete = !_gameScreen || !_gameScreen->isDirty();
+		const bool uploadPending = _gameScreen && _gameScreen->isDirty();
+		const bool sourceDataReady = _gameScreen ? _gameScreen->isSourceDataReady() :
+			(sourceTexture->wasLastUploadSuccessful() &&
+			 sourceTexture->getUploadedStorageGeneration() == sourceTexture->getStorageGeneration());
 		const GLenum textureError = glGetError();
-		LOGI("AdventurePadMirror source=%s logical=%ux%u allocated=%ux%u id=%u valid=%d dirty=%d gpuDataReady=%d linearFilter=%d glError=0x%x",
+		LOGI("AdventurePadMirror source=%s logical=%ux%u allocated=%ux%u id=%u valid=%d dirty=%d sourceDataReady=%d gpuGenerated=%d palettePending=%d framebufferGen=%u framebufferStorageGen=%u storageGen=%u uploadedStorageGen=%u linearFilter=%d glError=0x%x",
 				sourceType, sourceTexture->getLogicalWidth(), sourceTexture->getLogicalHeight(),
 				sourceTexture->getWidth(), sourceTexture->getHeight(), sourceTexture->getGLTexture(),
 				textureValid, _gameScreen ? _gameScreen->isDirty() : 0,
-				textureValid && uploadComplete, sourceTexture->isLinearFilteringEnabled(), textureError);
+				sourceDataReady, _gameScreen ? _gameScreen->isGPUGeneratedSource() : 0,
+				_gameScreen ? _gameScreen->isPaletteUploadPending() : 0,
+				_gameScreen ? _gameScreen->getFramebufferGeneration() : 0,
+				_gameScreen ? _gameScreen->getFramebufferStorageGeneration() : 0,
+				sourceTexture->getStorageGeneration(),
+				sourceTexture->getUploadedStorageGeneration(),
+				sourceTexture->isLinearFilteringEnabled(), textureError);
 		logMirrorGLState("primary-before-switch");
-		if (!textureValid || !uploadComplete || textureError != GL_NO_ERROR) {
+		if (!textureValid || uploadPending || textureError != GL_NO_ERROR) {
 			JNI::failMirrorSurface("Reusable source texture is not valid in the primary context");
 			return;
 		}
@@ -310,25 +681,61 @@ void AndroidGraphicsManager::renderMirrorSurface() {
 		logMirrorGLState("mirror-before-clear");
 	GL_CALL(glClear(GL_COLOR_BUFFER_BIT));
 
-	const int sourceWidth = sourceTexture->getLogicalWidth();
-	const int sourceHeight = sourceTexture->getLogicalHeight();
+	const int cropLeft = MAX(0, MIN(sourceWidth - 1, (int)std::floor(_mirrorCropLeft * sourceWidth)));
+	// Split payloads are snapped to a source row by AdventurePad. Round here too so
+	// lower and upper regions share the exact same row boundary without overlap.
+	const int cropTop = MAX(0, MIN(sourceHeight - 1, (int)std::lround(_mirrorCropTop * sourceHeight)));
+	const int cropRight = MAX(cropLeft + 1, MIN(sourceWidth, (int)std::ceil(_mirrorCropRight * sourceWidth)));
+	const int cropBottom = MAX(cropTop + 1, MIN(sourceHeight, (int)std::ceil(_mirrorCropBottom * sourceHeight)));
+	const int cropWidth = cropRight - cropLeft;
+	const int cropHeight = cropBottom - cropTop;
+	const bool rotatedDimensions = _rotationMode == Common::kRotation90 ||
+		_rotationMode == Common::kRotation270;
+	const int orientedCropWidth = rotatedDimensions ? cropHeight : cropWidth;
+	const int orientedCropHeight = rotatedDimensions ? cropWidth : cropHeight;
 	int destinationWidth = surfaceWidth;
-	int destinationHeight = (int)((int64)surfaceWidth * sourceHeight / sourceWidth);
+	int destinationHeight = MAX(1, (int)((int64)surfaceWidth * orientedCropHeight / orientedCropWidth));
 	if (destinationHeight > surfaceHeight) {
 		destinationHeight = surfaceHeight;
-		destinationWidth = (int)((int64)surfaceHeight * sourceWidth / sourceHeight);
+		destinationWidth = MAX(1, (int)((int64)surfaceHeight * orientedCropWidth / orientedCropHeight));
 	}
 	const int destinationX = (surfaceWidth - destinationWidth) / 2;
 	const int destinationY = (surfaceHeight - destinationHeight) / 2;
 	const GLenum beforeDrawError = glGetError();
-	// Use the exact full-texture overload used by the successful upper draw.
-	// This preserves the texture object's canonical flip/rotation coordinates.
-	pipeline->drawTexture(*sourceTexture, destinationX, destinationY,
-			destinationWidth, destinationHeight);
+	// Clip by interpolating within the texture's own canonical flip/rotation
+	// coordinates. Never assume an unflipped 0..1 orientation here.
+	pipeline->drawTextureNormalizedCrop(*sourceTexture, destinationX, destinationY,
+			destinationWidth, destinationHeight,
+			(float)cropLeft / sourceWidth, (float)cropTop / sourceHeight,
+			(float)cropRight / sourceWidth, (float)cropBottom / sourceHeight);
+	if (_mirrorRefreshFramePending || _mirrorCursorFramePending)
+		logMirrorTextureLifecycle("mirror source draw issued");
+
+	const bool cursorVisible = _cursorVisible && _cursor && !_overlayVisible && !_gameDrawRect.isEmpty();
+	int cursorSourceX = 0;
+	int cursorSourceY = 0;
+	if (cursorVisible) {
+		cursorSourceX = CLIP<int>((int)std::floor(
+				((float)_cursorX - _gameDrawRect.left) * sourceWidth / _gameDrawRect.width()),
+				0, sourceWidth - 1);
+		cursorSourceY = CLIP<int>((int)std::floor(
+				((float)_cursorY - _gameDrawRect.top) * sourceHeight / _gameDrawRect.height()),
+				0, sourceHeight - 1);
+	}
+	if (cursorSourceX != _reportedMirrorCursorX || cursorSourceY != _reportedMirrorCursorY ||
+			cursorVisible != _reportedMirrorCursorVisible ||
+			_mirrorGeometryGeneration != _reportedMirrorCursorGeometryGeneration) {
+		JNI::reportMirrorCursor(cursorSourceX, cursorSourceY, cursorVisible,
+				_mirrorGeometryGeneration);
+		_reportedMirrorCursorX = cursorSourceX;
+		_reportedMirrorCursorY = cursorSourceY;
+		_reportedMirrorCursorVisible = cursorVisible;
+		_reportedMirrorCursorGeometryGeneration = _mirrorGeometryGeneration;
+	}
 	const GLenum drawError = glGetError();
 	if (_mirrorDiagnosticFramesRemaining > 0) {
-		LOGI("AdventurePadMirror draw source=0,0-%d,%d destinationVertices=[%d,%d %d,%d %d,%d %d,%d] surface=%dx%d glErrorBefore=0x%x glErrorAfter=0x%x",
-				sourceWidth, sourceHeight, destinationX, destinationY,
+		LOGI("AdventurePadMirror draw source=%d,%d-%d,%d destinationVertices=[%d,%d %d,%d %d,%d %d,%d] surface=%dx%d glErrorBefore=0x%x glErrorAfter=0x%x",
+				cropLeft, cropTop, cropRight, cropBottom, destinationX, destinationY,
 				destinationX + destinationWidth, destinationY,
 				destinationX, destinationY + destinationHeight,
 				destinationX + destinationWidth, destinationY + destinationHeight,
@@ -338,6 +745,8 @@ void AndroidGraphicsManager::renderMirrorSurface() {
 	}
 
 	const bool swapped = beforeDrawError == GL_NO_ERROR && drawError == GL_NO_ERROR && JNI::swapMirrorSurface();
+	if (_mirrorRefreshFramePending || _mirrorCursorFramePending)
+		logMirrorRenderTransition(swapped ? "mirror swap succeeded" : "mirror swap failed");
 	OpenGL::Pipeline::disable();
 	bool primaryRestored = JNI::makePrimarySurfaceCurrent();
 	if (!primaryRestored) {
@@ -365,12 +774,24 @@ void AndroidGraphicsManager::renderMirrorSurface() {
 	}
 
 	if (!swapped || !primaryRestored) {
+		if (_pendingCropAckGeneration > 0) {
+			JNI::reportMirrorCropAck(2, _pendingCropAckGeneration,
+					_pendingCropAckGeometryGeneration, "Crop draw failed; full frame restored");
+			_pendingCropAckGeneration = 0;
+		}
+		_mirrorCropLeft = _mirrorCropTop = 0.0f;
+		_mirrorCropRight = _mirrorCropBottom = 1.0f;
 		_mirrorSourceState = -1;
 		return;
 	}
+	if (_pendingCropAckGeneration > 0) {
+		JNI::reportMirrorCropAck(1, _pendingCropAckGeneration,
+				_pendingCropAckGeometryGeneration, "Crop applied to live mirror");
+		_pendingCropAckGeneration = 0;
+	}
 
 	if (_mirrorSourceState != 1) {
-		JNI::reportMirrorStatus(1, "Live full-frame texture mirror supported");
+		JNI::reportMirrorStatus(1, "Live crop-capable texture mirror supported");
 		_mirrorSourceState = 1;
 	}
 }
@@ -522,9 +943,26 @@ bool AndroidGraphicsManager::notifyMousePosition(Common::Point &mouse) {
 	mouse.x = CLIP<int16>(mouse.x, _activeArea.drawRect.left, _activeArea.drawRect.right);
 	mouse.y = CLIP<int16>(mouse.y, _activeArea.drawRect.top, _activeArea.drawRect.bottom);
 
+	const bool moved = mouse.x != _cursorX || mouse.y != _cursorY;
 	setMousePosition(mouse.x, mouse.y);
+	if (moved && _awaitingFirstMirrorCursorMovement) {
+		_awaitingFirstMirrorCursorMovement = false;
+		_mirrorCursorFramePending = true;
+		logMirrorRenderTransition("first cursor movement marked cursor redraw");
+		logMirrorTextureLifecycle("sequence-B first cursor movement received");
+	}
 	mouse = convertWindowToVirtual(mouse.x, mouse.y);
 
+	return true;
+}
+
+bool AndroidGraphicsManager::notifyMousePositionVirtual(Common::Point &mouse) {
+	if (_activeArea.width <= 0 || _activeArea.height <= 0)
+		return false;
+	mouse.x = CLIP<int16>(mouse.x, 0, _activeArea.width - 1);
+	mouse.y = CLIP<int16>(mouse.y, 0, _activeArea.height - 1);
+	const Common::Point window = convertVirtualToWindow(mouse.x, mouse.y);
+	setMousePosition(window.x, window.y);
 	return true;
 }
 

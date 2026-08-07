@@ -154,6 +154,12 @@ public:
 	 */
 	const GLfloat *getTexCoords() const { return _texCoords; }
 
+	/** Derive a clipped rectangle from the canonical flip/rotation coordinates. */
+	void getTexCoordsForNormalizedRect(GLfloat left, GLfloat top, GLfloat right,
+			GLfloat bottom, GLfloat output[4*2]) const;
+	static void calculateClippedTexCoords(const GLfloat canonical[4*2], GLfloat left,
+			GLfloat top, GLfloat right, GLfloat bottom, GLfloat output[4*2]);
+
 	/**
 	 * Obtain texture name.
 	 *
@@ -161,6 +167,15 @@ public:
 	 * destroy will invalidate the texture name.
 	 */
 	GLuint getGLTexture() const { return _glTexture; }
+
+	/** Monotonic diagnostics for texture-name, storage, and pixel-upload operations. */
+	uint32 getNameGeneration() const { return _nameGeneration; }
+	uint32 getStorageGeneration() const { return _storageGeneration; }
+	uint32 getUploadGeneration() const { return _uploadGeneration; }
+	uint32 getUploadedStorageGeneration() const { return _uploadedStorageGeneration; }
+	bool wasLastStorageSuccessful() const { return _lastStorageSuccessful; }
+	bool wasLastUploadSuccessful() const { return _lastUploadSuccessful; }
+	const Common::Rect &getLastUploadArea() const { return _lastUploadArea; }
 
 	static inline const Graphics::PixelFormat getRGBPixelFormat() {
 		return Graphics::PixelFormat::createFormatRGB24();
@@ -191,6 +206,13 @@ protected:
 	GLint _glFilter;
 
 	GLuint _glTexture;
+	uint32 _nameGeneration;
+	uint32 _storageGeneration;
+	uint32 _uploadGeneration;
+	uint32 _uploadedStorageGeneration;
+	bool _lastStorageSuccessful;
+	bool _lastUploadSuccessful;
+	Common::Rect _lastUploadArea;
 };
 
 } // End of namespace OpenGL

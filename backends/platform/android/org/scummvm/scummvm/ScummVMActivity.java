@@ -899,6 +899,7 @@ public class ScummVMActivity extends Activity {
 
 		@Override
 		protected void setCurrentGame(String target) {
+			RelativeInputService.setCurrentGameTarget(target);
 			Uri data = null;
 			if (target != null) {
 				data = Uri.fromParts("scummvm", target, null);

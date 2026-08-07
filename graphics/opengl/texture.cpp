@@ -37,7 +37,11 @@ Texture::Texture(GLenum glIntFormat, GLenum glFormat, GLenum glType, bool autoCr
 	: _glIntFormat(glIntFormat), _glFormat(glFormat), _glType(glType),
 	  _width(0), _height(0), _logicalWidth(0), _logicalHeight(0),
 	  _flip(false), _rotation(Common::kRotationNormal),
-	  _texCoords(), _glFilter(GL_NEAREST), _glTexture(0) {
+	  _texCoords(), _glFilter(GL_NEAREST), _glTexture(0),
+	  _nameGeneration(0), _storageGeneration(0), _uploadGeneration(0),
+	  _uploadedStorageGeneration(0),
+	  _lastStorageSuccessful(false), _lastUploadSuccessful(false),
+	  _lastUploadArea() {
 	if (autoCreate)
 		create();
 }
@@ -106,6 +110,10 @@ void Texture::setWrapMode(WrapMode wrapMode) {
 }
 
 void Texture::destroy() {
+	_lastStorageSuccessful = false;
+	_lastUploadSuccessful = false;
+	_uploadedStorageGeneration = 0;
+	_lastUploadArea = Common::Rect();
 	if (!_glTexture) {
 		return;
 	}
@@ -119,6 +127,7 @@ void Texture::create() {
 
 	// Get a new texture name.
 	GL_CALL(glGenTextures(1, &_glTexture));
+	++_nameGeneration;
 
 	// Set up all texture parameters.
 	bind();
@@ -137,8 +146,14 @@ void Texture::create() {
 	// If a size is specified, allocate memory for it.
 	if (_width != 0 && _height != 0) {
 		// Allocate storage for OpenGL texture.
-		GL_CALL(glTexImage2D(GL_TEXTURE_2D, 0, _glIntFormat, _width, _height,
+		bool error;
+		GL_CALL_CHECK(error, glTexImage2D(GL_TEXTURE_2D, 0, _glIntFormat, _width, _height,
 		                     0, _glFormat, _glType, nullptr));
+		++_storageGeneration;
+		_lastStorageSuccessful = !error;
+		_lastUploadSuccessful = false;
+		_uploadedStorageGeneration = 0;
+		_lastUploadArea = Common::Rect();
 	}
 }
 
@@ -178,6 +193,11 @@ bool Texture::setSize(uint width, uint height) {
 			bool error;
 			GL_CALL_CHECK(error, glTexImage2D(GL_TEXTURE_2D, 0, _glIntFormat, _width, _height,
 			             0, _glFormat, _glType, nullptr));
+			++_storageGeneration;
+			_lastStorageSuccessful = !error;
+			_lastUploadSuccessful = false;
+			_uploadedStorageGeneration = 0;
+			_lastUploadArea = Common::Rect();
 			if (error) {
 				return false;
 			}
@@ -246,6 +266,29 @@ void Texture::computeTexCoords() {
 	}
 }
 
+void Texture::getTexCoordsForNormalizedRect(GLfloat left, GLfloat top, GLfloat right,
+		GLfloat bottom, GLfloat output[4*2]) const {
+	calculateClippedTexCoords(_texCoords, left, top, right, bottom, output);
+}
+
+void Texture::calculateClippedTexCoords(const GLfloat canonical[4*2], GLfloat left,
+		GLfloat top, GLfloat right, GLfloat bottom, GLfloat output[4*2]) {
+	const GLfloat positions[4*2] = {
+		left, top, right, top, left, bottom, right, bottom
+	};
+	for (int i = 0; i < 4; ++i) {
+		const GLfloat u = positions[i * 2];
+		const GLfloat v = positions[i * 2 + 1];
+		for (int component = 0; component < 2; ++component) {
+			const GLfloat topEdge = canonical[component] * (1.0f - u) +
+				canonical[2 + component] * u;
+			const GLfloat bottomEdge = canonical[4 + component] * (1.0f - u) +
+				canonical[6 + component] * u;
+			output[i * 2 + component] = topEdge * (1.0f - v) + bottomEdge * v;
+		}
+	}
+}
+
 void Texture::updateArea(const Common::Rect &area, const Graphics::Surface &src) {
 	// Set the texture on the active texture unit.
 	if (!bind()) {
@@ -271,11 +314,16 @@ void Texture::updateArea(const Common::Rect &area, const Graphics::Surface &src)
 	// 3) Use glTexSubImage2D per line changed. This is what the old OpenGL
 	//    graphics manager did but it is much slower! Thus, we do not use it.
 	GL_CALL(glPixelStorei(GL_UNPACK_ALIGNMENT, 1));
-	GL_CALL(glTexSubImage2D(GL_TEXTURE_2D, 0, 0, area.top, src.w, area.height(),
+	bool error;
+	GL_CALL_CHECK(error, glTexSubImage2D(GL_TEXTURE_2D, 0, 0, area.top, src.w, area.height(),
 	                       _glFormat, _glType, src.getBasePtr(0, area.top)));
+	++_uploadGeneration;
+	_lastUploadSuccessful = !error;
+	if (!error)
+		_uploadedStorageGeneration = _storageGeneration;
+	_lastUploadArea = Common::Rect(0, area.top, src.w, area.bottom);
 }
 
 } // End of namespace OpenGL
 
 #endif
-

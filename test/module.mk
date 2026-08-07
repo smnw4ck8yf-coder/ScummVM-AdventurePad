@@ -13,6 +13,12 @@ TESTS        := $(srcdir)/test/common/*.h \
 	$(srcdir)/test/image/*.h
 TEST_LIBS    :=
 
+ifdef USE_OPENGL
+TESTS += $(srcdir)/test/graphics/opengl_texture_coords.h
+TESTS += $(srcdir)/test/graphics/android_upper_presentation.h
+TESTS += $(srcdir)/test/graphics/android_mirror_cursor.h
+endif
+
 ifdef POSIX
 TEST_LIBS += test/system/null_osystem.o \
 	backends/fs/posix/posix-fs-factory.o \

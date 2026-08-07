@@ -44,7 +44,18 @@ namespace OpenGL {
 //
 
 Surface::Surface()
-	: _allDirty(false), _dirtyArea() {
+	: _allDirty(false), _dirtyArea(), _mutationGeneration(0), _cleanGeneration(0) {
+}
+
+void Surface::flagDirty() {
+	_allDirty = true;
+	++_mutationGeneration;
+}
+
+void Surface::clearDirty() {
+	_allDirty = false;
+	_dirtyArea = Common::Rect();
+	++_cleanGeneration;
 }
 
 void Surface::copyRectToTexture(uint x, uint y, uint w, uint h, const void *srcPtr, uint srcPitch) {
@@ -85,6 +96,7 @@ void Surface::fill(const Common::Rect &r, uint32 color) {
 }
 
 void Surface::addDirtyArea(const Common::Rect &r) {
+	++_mutationGeneration;
 	// *sigh* Common::Rect::extend behaves unexpected whenever one of the two
 	// parameters is an empty rect. Thus, we check whether the current dirty
 	// area is valid. In case it is not we simply use the parameters as new
@@ -212,7 +224,8 @@ FakeTextureSurface::FakeTextureSurface(GLenum glIntFormat, GLenum glFormat, GLen
 	  _rgbData(),
 	  _blitFunc(nullptr),
 	  _palette(nullptr),
-	  _mask(nullptr) {
+	  _mask(nullptr),
+	  _paletteGeneration(0) {
 	if (_fakeFormat.isCLUT8()) {
 		_palette = new uint32[256]();
 	} else {
@@ -265,6 +278,7 @@ void FakeTextureSurface::setColorKey(uint colorKey) {
 	// before setting the key color.
 	uint32 *palette = _palette + colorKey;
 	*palette = 0;
+	++_paletteGeneration;
 
 	// A palette changes means we need to refresh the whole surface.
 	flagDirty();
@@ -275,6 +289,7 @@ void FakeTextureSurface::setPalette(uint start, uint colors, const byte *palData
 		return;
 
 	Graphics::convertPaletteToMap(_palette + start, palData, colors, _format);
+	++_paletteGeneration;
 
 	// A palette changes means we need to refresh the whole surface.
 	flagDirty();
@@ -454,7 +469,8 @@ TextureSurfaceCLUT8GPU::TextureSurfaceCLUT8GPU()
 	  _paletteTexture(GL_RGBA, GL_RGBA, GL_UNSIGNED_BYTE),
 	  _target(new TextureTarget()), _clut8Pipeline(new CLUT8LookUpPipeline()),
 	  _clut8Vertices(), _clut8Data(), _userPixelData(), _palette(),
-	  _paletteDirty(false) {
+	  _paletteDirty(false), _paletteGeneration(0), _framebufferGeneration(0),
+	  _framebufferStorageGeneration(0), _lastFramebufferGenerationSuccessful(false) {
 	// Allocate space for 256 colors.
 	_paletteTexture.setSize(256, 1);
 
@@ -556,6 +572,7 @@ void TextureSurfaceCLUT8GPU::setColorKey(uint colorKey) {
 	_palette[colorKey * 4 + 2] = 0x00;
 	_palette[colorKey * 4 + 3] = 0x00;
 
+	++_paletteGeneration;
 	_paletteDirty = true;
 }
 
@@ -570,6 +587,7 @@ void TextureSurfaceCLUT8GPU::setPalette(uint start, uint colors, const byte *pal
 		palData += 3;
 	}
 
+	++_paletteGeneration;
 	_paletteDirty = true;
 }
 
@@ -609,6 +627,11 @@ void TextureSurfaceCLUT8GPU::lookUpColors() {
 	_clut8Pipeline->drawTexture(_clut8Texture, _clut8Vertices);
 
 	_clut8Pipeline->deactivate();
+	const GLenum error = glGetError();
+	++_framebufferGeneration;
+	_lastFramebufferGenerationSuccessful = error == GL_NO_ERROR;
+	if (_lastFramebufferGenerationSuccessful)
+		_framebufferStorageGeneration = getGLTexture().getStorageGeneration();
 }
 #endif // !USE_FORCED_GLES
 

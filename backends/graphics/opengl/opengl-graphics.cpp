@@ -743,27 +743,31 @@ void OpenGLGraphicsManager::renderCursor() {
 	(1 - inversion)*(1 - alpha) in the alpha channel and use and use ((1-dstColor)*src+(1-srcAlpha)*dest) blend formula to do
 	the inversion and opacity mask at once.  We use 1-srcAlpha instead of srcAlpha so zero-fill is transparent.
 	*/
+	GLfloat cursorX = _cursorX - _cursorHotspotXScaled + _shakeOffsetScaled.x;
+	GLfloat cursorY = _cursorY - _cursorHotspotYScaled + _shakeOffsetScaled.y;
+	GLfloat cursorWidth = _cursorWidthScaled;
+	GLfloat cursorHeight = _cursorHeightScaled;
+	if (!transformCursorForPresentation(cursorX, cursorY, cursorWidth, cursorHeight))
+		return;
+
 	if (_cursorMask) {
 		_targetBuffer->enableBlend(Framebuffer::kBlendModeMaskAlphaAndInvertByColor);
 
-		_pipeline->drawTexture(_cursorMask->getGLTexture(),
-							   _cursorX - _cursorHotspotXScaled + _shakeOffsetScaled.x,
-							   _cursorY - _cursorHotspotYScaled + _shakeOffsetScaled.y,
-							   _cursorWidthScaled, _cursorHeightScaled);
+		_pipeline->drawTexture(_cursorMask->getGLTexture(), cursorX, cursorY,
+				cursorWidth, cursorHeight);
 
 		_targetBuffer->enableBlend(Framebuffer::kBlendModeAdditive);
 	} else
 		_targetBuffer->enableBlend(Framebuffer::kBlendModePremultipliedTransparency);
 
-	_pipeline->drawTexture(_cursor->getGLTexture(),
-						   _cursorX - _cursorHotspotXScaled + _shakeOffsetScaled.x,
-						   _cursorY - _cursorHotspotYScaled + _shakeOffsetScaled.y,
-						   _cursorWidthScaled, _cursorHeightScaled);
+	_pipeline->drawTexture(_cursor->getGLTexture(), cursorX, cursorY,
+			cursorWidth, cursorHeight);
 }
 
 void OpenGLGraphicsManager::clearPresentationRect(const Common::Rect &rect, GLfloat r, GLfloat g, GLfloat b) {
 	const Common::Rect displayRect(0, 0, _windowWidth, _windowHeight);
-	const Common::Rect gameRect = _gameDrawRect.findIntersectingRect(displayRect);
+	const Common::Rect presentationRect = getPresentationGameRect();
+	const Common::Rect gameRect = presentationRect.findIntersectingRect(displayRect);
 	const Common::Rect presentationAreas[] = {
 		Common::Rect(0, 0, _windowWidth, gameRect.top),
 		Common::Rect(0, gameRect.bottom, _windowWidth, _windowHeight),
@@ -788,7 +792,8 @@ void OpenGLGraphicsManager::renderPresentationLayer() {
 		return;
 
 	const Common::Rect displayRect(0, 0, _windowWidth, _windowHeight);
-	const Common::Rect gameRect = _gameDrawRect.findIntersectingRect(displayRect);
+	const Common::Rect presentationRect = getPresentationGameRect();
+	const Common::Rect gameRect = presentationRect.findIntersectingRect(displayRect);
 	if (gameRect == displayRect)
 		return;
 
@@ -834,9 +839,9 @@ void OpenGLGraphicsManager::renderPresentationLayer() {
 	// decoration clears above overwrite the framebuffer object's stored scissor
 	// rectangle, so restore the game rectangle before that enable occurs.
 	_targetBuffer->setClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-	_targetBuffer->setScissorBox(_gameDrawRect.left,
-			_windowHeight - _gameDrawRect.height() - _gameDrawRect.top,
-			_gameDrawRect.width(), _gameDrawRect.height());
+	_targetBuffer->setScissorBox(presentationRect.left,
+			_windowHeight - presentationRect.height() - presentationRect.top,
+			presentationRect.width(), presentationRect.height());
 	_targetBuffer->enableScissorTest(false);
 }
 
@@ -925,6 +930,10 @@ void OpenGLGraphicsManager::updateScreen() {
 		// The scissor test is enabled to:
 		// - Clip the cursor to the game screen
 		// - Clip the game screen when the shake offset is non-zero
+		const Common::Rect presentationRect = getPresentationGameRect();
+		_targetBuffer->setScissorBox(presentationRect.left,
+				_windowHeight - presentationRect.height() - presentationRect.top,
+				presentationRect.width(), presentationRect.height());
 		_targetBuffer->enableScissorTest(true);
 	}
 
@@ -935,12 +944,29 @@ void OpenGLGraphicsManager::updateScreen() {
 	_targetBuffer->enableBlend(Framebuffer::kBlendModeOpaque);
 
 	// First step: Draw the (virtual) game screen.
+	const Common::Rect presentationRect = getPresentationGameRect();
+	GLfloat cropLeft = 0.0f, cropTop = 0.0f, cropRight = 1.0f, cropBottom = 1.0f;
+	const bool cropPresentation = getPresentationTextureCrop(cropLeft, cropTop, cropRight, cropBottom);
 	if (_gameScreen) {
-		_pipeline->drawTexture(_gameScreen->getGLTexture(), _gameDrawRect.left, _gameDrawRect.top, _gameDrawRect.width(), _gameDrawRect.height());
+		if (cropPresentation) {
+			_pipeline->drawTextureNormalizedCrop(_gameScreen->getGLTexture(), presentationRect.left,
+					presentationRect.top, presentationRect.width(), presentationRect.height(),
+					cropLeft, cropTop, cropRight, cropBottom);
+		} else {
+			_pipeline->drawTexture(_gameScreen->getGLTexture(), presentationRect.left,
+					presentationRect.top, presentationRect.width(), presentationRect.height());
+		}
 	}
 #if defined(USE_OPENGL_GAME) || defined(USE_OPENGL_SHADERS)
 	else if (_renderer3d && _renderer3d->hasTexture()) {
-		_pipeline->drawTexture(_renderer3d->getGLTexture(), _gameDrawRect.left, _gameDrawRect.top, _gameDrawRect.width(), _gameDrawRect.height());
+		if (cropPresentation) {
+			_pipeline->drawTextureNormalizedCrop(_renderer3d->getGLTexture(), presentationRect.left,
+					presentationRect.top, presentationRect.width(), presentationRect.height(),
+					cropLeft, cropTop, cropRight, cropBottom);
+		} else {
+			_pipeline->drawTexture(_renderer3d->getGLTexture(), presentationRect.left,
+					presentationRect.top, presentationRect.width(), presentationRect.height());
+		}
 	}
 #endif
 

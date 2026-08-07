@@ -140,6 +140,12 @@ public:
 
 protected:
 	void renderCursor();
+	virtual Common::Rect getPresentationGameRect() const { return _gameDrawRect; }
+	virtual bool getPresentationTextureCrop(GLfloat &left, GLfloat &top,
+			GLfloat &right, GLfloat &bottom) const { return false; }
+	virtual bool transformCursorForPresentation(GLfloat &x, GLfloat &y,
+			GLfloat &width, GLfloat &height) const { return true; }
+	Common::Point getScaledCursorShakeOffset() const { return _shakeOffsetScaled; }
 
 	/**
 	 * Whether a GLES or GLES2 context is active.
