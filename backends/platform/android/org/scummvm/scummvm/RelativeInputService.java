@@ -9,7 +9,9 @@
 package org.scummvm.scummvm;
 
 import android.app.Service;
+import android.content.ComponentName;
 import android.content.Intent;
+import android.net.Uri;
 import android.os.Handler;
 import android.os.Bundle;
 import android.os.IBinder;
@@ -21,7 +23,14 @@ import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.Surface;
 
+import java.io.File;
+import java.io.FileReader;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashSet;
+import java.util.Map;
 
 /** Receives bounded relative pointer deltas from the separately installed AdventurePad app. */
 public final class RelativeInputService extends Service {
@@ -33,6 +42,21 @@ public final class RelativeInputService extends Service {
 	private static final int MSG_RIGHT_BUTTON_UP = 5;
 	private static final int MSG_JOYSTICK_AXIS = 6;
 	private static final int MSG_GAMEPAD_KEY = 7;
+	private static final int MSG_VERTICAL_SCROLL = 8;
+	private static final int MSG_QUERY_GAME_LIBRARY = 200;
+	private static final int MSG_LAUNCH_GAME_TARGET = 201;
+	private static final int MSG_OPEN_SCUMMVM_LIBRARY = 202;
+	private static final int MSG_GAME_LIBRARY = 203;
+	private static final String KEY_TARGETS = "targets";
+	private static final String KEY_TARGET_ID = "targetId";
+	private static final String KEY_TITLE = "title";
+	private static final String KEY_ENGINE_ID = "engineId";
+	private static final String KEY_GAME_ID = "gameId";
+	private static final String KEY_ERROR = "error";
+	private static final String EXTRA_ADVENTUREPAD_FACADE =
+		"org.scummvm.scummvm.extra.ADVENTUREPAD_FACADE";
+	private static final String EXTRA_ADVENTUREPAD_ADVANCED =
+		"org.scummvm.scummvm.extra.ADVENTUREPAD_ADVANCED";
 	private static final float MAX_ABSOLUTE_DELTA = 512.0f;
 	private static final double JE_BALL_UNITS_PER_PIXEL = 50.0;
 	private static final int JOYSTICK_AXIS_MAX = 32767;
@@ -43,9 +67,24 @@ public final class RelativeInputService extends Service {
 
 	private static volatile ScummVM _nativeEventSink;
 	private static volatile String _currentGameTarget = "";
+	private static Messenger _geometryRecipient;
+	private static int _mirrorSourceWidth;
+	private static int _mirrorSourceHeight;
+	private static int _mirrorSourceCapability;
+	private static int _mirrorSourceOrientation;
+	private static long _mirrorGeometryGeneration;
 
 	static void setCurrentGameTarget(String target) {
-		_currentGameTarget = target == null ? "" : target;
+		String newTarget = target == null ? "" : target;
+		ScummVM sink;
+		synchronized (RelativeInputService.class) {
+			if (newTarget.equals(_currentGameTarget))
+				return;
+			_currentGameTarget = newTarget;
+			sink = _nativeEventSink;
+		}
+		if (sink != null)
+			sink.reportCurrentGameTargetChanged(newTarget);
 	}
 
 	static String getCurrentGameTarget() {
@@ -54,6 +93,7 @@ public final class RelativeInputService extends Service {
 
 	private double _fractionalResidualX;
 	private double _fractionalResidualY;
+	private double _fractionalScrollResidual;
 	private final int[] _joystickAxisPositions = new int[8];
 	private final HashSet<Integer> _gamepadKeysDown = new HashSet<>();
 	private boolean _leftButtonDown;
@@ -65,15 +105,48 @@ public final class RelativeInputService extends Service {
 	private final Messenger _messenger = new Messenger(new IncomingHandler(Looper.getMainLooper()));
 
 	static void attachNativeEventSink(ScummVM sink) {
-		_nativeEventSink = sink;
+		Messenger geometryRecipient;
+		String currentGameTarget;
+		int sourceWidth;
+		int sourceHeight;
+		int sourceCapability;
+		int sourceOrientation;
+		long geometryGeneration;
+		synchronized (RelativeInputService.class) {
+			if (_nativeEventSink == sink)
+				return;
+			_nativeEventSink = sink;
+			geometryRecipient = _geometryRecipient;
+			currentGameTarget = _currentGameTarget;
+			sourceWidth = _mirrorSourceWidth;
+			sourceHeight = _mirrorSourceHeight;
+			sourceCapability = _mirrorSourceCapability;
+			sourceOrientation = _mirrorSourceOrientation;
+			geometryGeneration = _mirrorGeometryGeneration;
+		}
+		sink.restoreMirrorGeometryRegistration(geometryRecipient, currentGameTarget,
+			sourceWidth, sourceHeight, sourceCapability, sourceOrientation, geometryGeneration);
 		Log.i(TAG, "Native event sink attached");
 	}
 
 	static void detachNativeEventSink(ScummVM sink) {
-		if (_nativeEventSink == sink) {
+		synchronized (RelativeInputService.class) {
+			if (_nativeEventSink != sink)
+				return;
 			_nativeEventSink = null;
-			Log.i(TAG, "Native event sink detached");
 		}
+		Log.i(TAG, "Native event sink detached");
+	}
+
+	static synchronized void rememberMirrorSourceGeometry(ScummVM sink, int width, int height,
+			int capability, int orientation, long generation) {
+		if (_nativeEventSink != sink)
+			return;
+		_mirrorSourceWidth = width;
+		_mirrorSourceHeight = height;
+		_mirrorSourceCapability = capability;
+		_mirrorSourceOrientation = orientation;
+		_mirrorGeometryGeneration = generation;
 	}
 
 	@Override
@@ -96,6 +169,7 @@ public final class RelativeInputService extends Service {
 		releaseForwardedInput();
 		_fractionalResidualX = 0.0;
 		_fractionalResidualY = 0.0;
+		_fractionalScrollResidual = 0.0;
 		Log.i(TAG, "Relative input service destroyed");
 		super.onDestroy();
 	}
@@ -123,6 +197,18 @@ public final class RelativeInputService extends Service {
 			case MSG_GAMEPAD_KEY:
 				forwardGamepadKey(message.arg1, message.arg2);
 				return;
+			case MSG_VERTICAL_SCROLL:
+				forwardVerticalScroll(message);
+				return;
+			case MSG_QUERY_GAME_LIBRARY:
+				replyWithGameLibrary(message.replyTo);
+				return;
+			case MSG_LAUNCH_GAME_TARGET:
+				launchGameTarget(message.getData().getString(KEY_TARGET_ID));
+				return;
+			case MSG_OPEN_SCUMMVM_LIBRARY:
+				openScummVMLibrary();
+				return;
 			case MirrorSurfaceProtocol.MSG_ATTACH_SURFACE:
 				attachMirrorSurface(message);
 				return;
@@ -144,6 +230,79 @@ public final class RelativeInputService extends Service {
 			default:
 				Log.w(TAG, "Rejected unknown Messenger message type " + message.what);
 			}
+		}
+
+		private void replyWithGameLibrary(Messenger recipient) {
+			if (recipient == null)
+				return;
+			Bundle reply = new Bundle();
+			ArrayList<Bundle> targets = new ArrayList<>();
+			try (FileReader reader = new FileReader(new File(getFilesDir(), "scummvm.ini"))) {
+				Map<String, Map<String, String>> config = INIParser.parse(reader);
+				if (config == null)
+					throw new IOException("ScummVM configuration could not be parsed");
+				for (Map.Entry<String, Map<String, String>> section : config.entrySet()) {
+					Map<String, String> values = section.getValue();
+					String gameId = values.get("gameid");
+					if (gameId == null || gameId.isEmpty() || values.containsKey("id_came_from_command_line"))
+						continue;
+					Bundle target = new Bundle();
+					target.putString(KEY_TARGET_ID, section.getKey());
+					target.putString(KEY_TITLE, valueOrDefault(values, "description", section.getKey()));
+					target.putString(KEY_ENGINE_ID, valueOrDefault(values, "engineid", ""));
+					target.putString(KEY_GAME_ID, gameId);
+					targets.add(target);
+				}
+				Collections.sort(targets, new Comparator<Bundle>() {
+					@Override
+					public int compare(Bundle left, Bundle right) {
+						String leftTitle = left.getString(KEY_TITLE);
+						String rightTitle = right.getString(KEY_TITLE);
+						return (leftTitle == null ? "" : leftTitle).compareToIgnoreCase(
+							rightTitle == null ? "" : rightTitle);
+					}
+				});
+			} catch (IOException | RuntimeException exception) {
+				Log.e(TAG, "Unable to read configured ScummVM targets", exception);
+				reply.putString(KEY_ERROR, exception.getMessage() == null ?
+					exception.getClass().getSimpleName() : exception.getMessage());
+			}
+			reply.putParcelableArrayList(KEY_TARGETS, targets);
+			Message response = Message.obtain(null, MSG_GAME_LIBRARY);
+			response.setData(reply);
+			try {
+				recipient.send(response);
+			} catch (android.os.RemoteException exception) {
+				Log.w(TAG, "AdventurePad library reply failed", exception);
+			}
+		}
+
+		private String valueOrDefault(Map<String, String> values, String key, String fallback) {
+			String value = values.get(key);
+			return value == null || value.trim().isEmpty() ? fallback : value;
+		}
+
+		private void launchGameTarget(String targetId) {
+			if (targetId == null || targetId.isEmpty()) {
+				Log.w(TAG, "Rejected blank AdventurePad target launch");
+				return;
+			}
+			Intent intent = new Intent(Intent.ACTION_MAIN,
+				Uri.fromParts("scummvm", targetId, null));
+			intent.setComponent(new ComponentName(RelativeInputService.this, ScummVMActivity.class));
+			intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+			intent.putExtra(EXTRA_ADVENTUREPAD_FACADE, true);
+			startActivity(intent);
+		}
+
+		private void openScummVMLibrary() {
+			Intent intent = new Intent(Intent.ACTION_MAIN);
+			intent.setComponent(new ComponentName(RelativeInputService.this, ScummVMActivity.class));
+			// ScummVMActivity is singleInstance. Reusing it would deliver this flag only
+			// after the native launcher had already decided which widgets to create.
+			intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+			intent.putExtra(EXTRA_ADVENTUREPAD_ADVANCED, true);
+			startActivity(intent);
 		}
 
 		private void attachMirrorSurface(Message message) {
@@ -208,6 +367,9 @@ public final class RelativeInputService extends Service {
 		}
 
 		private void queryMirrorGeometry(Message message) {
+			synchronized (RelativeInputService.class) {
+				_geometryRecipient = message.replyTo;
+			}
 			ScummVM sink = _nativeEventSink;
 			if (sink == null || !sink.isMirrorOutputEnabled()) {
 				MirrorSurfaceProtocol.sendGeometry(message.replyTo, 0, 0, 0, 0, getCurrentGameTarget(), 0);
@@ -406,6 +568,31 @@ public final class RelativeInputService extends Service {
 			sink.pushEvent(ScummVMEvents.JE_MOUSE_BUTTON, action, button, 0, 0, 0, 0);
 		}
 
+		private void forwardVerticalScroll(Message message) {
+			float distance = Float.intBitsToFloat(message.arg1);
+			if (Float.isNaN(distance) || Float.isInfinite(distance) || distance == 0.0f)
+				return;
+
+			ScummVM sink = _nativeEventSink;
+			if (sink == null) {
+				Log.w(TAG, "Rejected vertical scroll because the native event sink is unavailable");
+				return;
+			}
+
+			// Preserve sub-step trackpad motion between Messenger messages. The existing
+			// wheel event path remains the sole owner of ScummVM launcher/game scrolling.
+			double accumulated = _fractionalScrollResidual + distance / 48.0;
+			int steps = accumulated > 0.0 ? (int)Math.floor(accumulated) : (int)Math.ceil(accumulated);
+			_fractionalScrollResidual = accumulated - steps;
+			int boundedSteps = Math.max(-16, Math.min(16, steps));
+			for (int i = 0; i < Math.abs(boundedSteps); ++i) {
+				int eventType = boundedSteps > 0
+					? ScummVMEvents.JE_MOUSE_WHEEL_UP
+					: ScummVMEvents.JE_MOUSE_WHEEL_DOWN;
+				sink.pushEvent(eventType, 0, 0, 0, 0, 0, 0);
+			}
+		}
+
 		private void forwardJoystickAxis(int axisFlag, int position) {
 			if (!isSingleSupportedAxisFlag(axisFlag)) {
 				Log.w(TAG, "Rejected joystick axis flag 0x" + Integer.toHexString(axisFlag));
@@ -480,6 +667,7 @@ public final class RelativeInputService extends Service {
 		_gamepadKeysDown.clear();
 		_leftButtonDown = false;
 		_rightButtonDown = false;
+		_fractionalScrollResidual = 0.0;
 	}
 
 	private static boolean isSingleSupportedAxisFlag(int axisFlag) {

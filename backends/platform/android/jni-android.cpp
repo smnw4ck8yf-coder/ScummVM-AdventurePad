@@ -41,6 +41,7 @@
 #include <time.h>
 
 #include "backends/platform/android/android.h"
+#include "backends/platform/android/adventurepad.h"
 #include "backends/platform/android/jni-android.h"
 #include "backends/platform/android/asset-archive.h"
 
@@ -107,6 +108,8 @@ jmethodID JNI::_MID_getScummVMBasePath;
 jmethodID JNI::_MID_getScummVMConfigPath;
 jmethodID JNI::_MID_getScummVMLogPath;
 jmethodID JNI::_MID_setCurrentGame = 0;
+jmethodID JNI::_MID_isAdventurePadAdvancedLaunch = 0;
+jmethodID JNI::_MID_returnToAdventurePad = 0;
 jmethodID JNI::_MID_notifyHTTPService = 0;
 jmethodID JNI::_MID_getSysArchives = 0;
 jmethodID JNI::_MID_getAllStorageLocations = 0;
@@ -120,6 +123,7 @@ jmethodID JNI::_MID_reportMirrorStatus = 0;
 jmethodID JNI::_MID_reportMirrorCursor = 0;
 jmethodID JNI::_MID_failMirrorSurface = 0;
 jmethodID JNI::_MID_reportMirrorSourceGeometry = 0;
+jmethodID JNI::_MID_mirrorGeometryGeneration = 0;
 jmethodID JNI::_MID_updateMirrorCrop = 0;
 jmethodID JNI::_MID_reportMirrorCropAck = 0;
 jmethodID JNI::_MID_updateUpperPresentation = 0;
@@ -602,6 +606,43 @@ void JNI::setCurrentGame(const Common::String &target) {
 	}
 }
 
+bool JNI::isAdventurePadAdvancedLaunch() {
+	JNIEnv *env = JNI::getEnv();
+	jboolean advancedLaunch = env->CallBooleanMethod(_jobj, _MID_isAdventurePadAdvancedLaunch);
+
+	if (env->ExceptionCheck()) {
+		LOGE("Failed to query AdventurePad advanced launch state");
+		env->ExceptionDescribe();
+		env->ExceptionClear();
+		return false;
+	}
+
+	return advancedLaunch == JNI_TRUE;
+}
+
+void JNI::returnToAdventurePad() {
+	JNIEnv *env = JNI::getEnv();
+	env->CallVoidMethod(_jobj, _MID_returnToAdventurePad);
+
+	if (env->ExceptionCheck()) {
+		LOGE("Failed to return to AdventurePad");
+		env->ExceptionDescribe();
+		env->ExceptionClear();
+	}
+}
+
+namespace Android {
+
+bool isAdventurePadAdvancedLaunch() {
+	return JNI::isAdventurePadAdvancedLaunch();
+}
+
+void returnToAdventurePad() {
+	JNI::returnToAdventurePad();
+}
+
+} // namespace Android
+
 void JNI::notifyHTTPService(int localPort, bool minimal) {
 	JNIEnv *env = JNI::getEnv();
 
@@ -832,6 +873,17 @@ int64 JNI::reportMirrorSourceGeometry(int width, int height, int capability, int
 	return generation;
 }
 
+int64 JNI::mirrorGeometryGeneration() {
+	JNIEnv *env = JNI::getEnv();
+	const int64 generation = env->CallLongMethod(_jobj, _MID_mirrorGeometryGeneration);
+	if (env->ExceptionCheck()) {
+		env->ExceptionDescribe();
+		env->ExceptionClear();
+		return 0;
+	}
+	return generation;
+}
+
 bool JNI::updateMirrorCrop(int64 &cropGeneration, int64 &geometryGeneration,
 		float &left, float &top, float &right, float &bottom) {
 	JNIEnv *env = JNI::getEnv();
@@ -974,6 +1026,8 @@ void JNI::create(JNIEnv *env, jobject self, jobject asset_manager,
 	FIND_METHOD(, getScummVMConfigPath, "()Ljava/lang/String;");
 	FIND_METHOD(, getScummVMLogPath, "()Ljava/lang/String;");
 	FIND_METHOD(, setCurrentGame, "(Ljava/lang/String;)V");
+	FIND_METHOD(, isAdventurePadAdvancedLaunch, "()Z");
+	FIND_METHOD(, returnToAdventurePad, "()V");
 	FIND_METHOD(, notifyHTTPService, "(IZ)V");
 	FIND_METHOD(, getSysArchives, "()[Ljava/lang/String;");
 	FIND_METHOD(, getAllStorageLocations, "()[Ljava/lang/String;");
@@ -987,6 +1041,7 @@ void JNI::create(JNIEnv *env, jobject self, jobject asset_manager,
 	FIND_METHOD(, reportMirrorCursor, "(IIZJ)V");
 	FIND_METHOD(, failMirrorSurface, "(JLjava/lang/String;)Z");
 	FIND_METHOD(, reportMirrorSourceGeometry, "(IIII)J");
+	FIND_METHOD(, mirrorGeometryGeneration, "()J");
 	FIND_METHOD(, updateMirrorCrop, "()[D");
 	FIND_METHOD(, reportMirrorCropAck, "(IJJLjava/lang/String;)V");
 	FIND_METHOD(, updateUpperPresentation, "()[D");

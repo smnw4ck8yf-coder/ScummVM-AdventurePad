@@ -215,6 +215,9 @@
 				<widget name = 'StartButton'
 						height = '12'
 				/>
+				<widget name = 'ReturnToAdventurePadButton'
+						height = '12'
+				/>
 			</layout>
 		</layout>
 	</dialog>

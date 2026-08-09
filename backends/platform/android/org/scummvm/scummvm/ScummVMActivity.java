@@ -182,6 +182,13 @@ public class ScummVMActivity extends Activity {
 	// This second finish causes termination when we are launched again
 	boolean _finishing = false;
 	private boolean _adventurePadLaunchAttempted = false;
+	private static final String EXTRA_ADVENTUREPAD_FACADE =
+		"org.scummvm.scummvm.extra.ADVENTUREPAD_FACADE";
+	private static final String EXTRA_ADVENTUREPAD_ADVANCED =
+		"org.scummvm.scummvm.extra.ADVENTUREPAD_ADVANCED";
+	private boolean _adventurePadFacadeLaunch = false;
+	private boolean _adventurePadFacadeGameStarted = false;
+	private volatile boolean _adventurePadAdvancedLaunch = false;
 
 	private final int[][] TextInputKeyboardList =
 	{
@@ -900,6 +907,20 @@ public class ScummVMActivity extends Activity {
 		@Override
 		protected void setCurrentGame(String target) {
 			RelativeInputService.setCurrentGameTarget(target);
+			if (_adventurePadFacadeLaunch) {
+				if (target != null && !target.isEmpty()) {
+					_adventurePadFacadeGameStarted = true;
+				} else if (_adventurePadFacadeGameStarted) {
+					_adventurePadFacadeLaunch = false;
+					_adventurePadFacadeGameStarted = false;
+					runOnUiThread(new Runnable() {
+						@Override
+						public void run() {
+							finish();
+						}
+					});
+				}
+			}
 			Uri data = null;
 			if (target != null) {
 				data = Uri.fromParts("scummvm", target, null);
@@ -911,6 +932,22 @@ public class ScummVMActivity extends Activity {
 			if (target != null) {
 				ShortcutCreatorActivity.pushShortcut(ScummVMActivity.this, target, intent);
 			}
+		}
+
+		@Override
+		protected boolean isAdventurePadAdvancedLaunch() {
+			return _adventurePadAdvancedLaunch;
+		}
+
+		@Override
+		protected void returnToAdventurePad() {
+			_adventurePadAdvancedLaunch = false;
+			runOnUiThread(new Runnable() {
+				@Override
+				public void run() {
+					finish();
+				}
+			});
 		}
 
 		@Override
@@ -1109,6 +1146,8 @@ public class ScummVMActivity extends Activity {
 		Log.i(ADVENTURE_PAD_LOG_TAG, "ScummVMActivity onCreate entered");
 
 		super.onCreate(savedInstanceState);
+		_adventurePadFacadeLaunch = getIntent().getBooleanExtra(EXTRA_ADVENTUREPAD_FACADE, false);
+		_adventurePadAdvancedLaunch = getIntent().getBooleanExtra(EXTRA_ADVENTUREPAD_ADVANCED, false);
 
 		setLogFile();
 
@@ -1384,6 +1423,9 @@ public class ScummVMActivity extends Activity {
 //		Log.d(ScummVM.LOG_TAG, "onNewIntent: " + intent.getData());
 
 		super.onNewIntent(intent);
+		_adventurePadFacadeLaunch = intent.getBooleanExtra(EXTRA_ADVENTUREPAD_FACADE, false);
+		_adventurePadFacadeGameStarted = false;
+		_adventurePadAdvancedLaunch = intent.getBooleanExtra(EXTRA_ADVENTUREPAD_ADVANCED, false);
 
 		Uri intentData = intent.getData();
 

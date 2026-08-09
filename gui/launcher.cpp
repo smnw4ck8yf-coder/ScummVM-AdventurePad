@@ -56,6 +56,10 @@
 #include "gui/ThemeEval.h"
 #include "engines/advancedDetector.h"
 
+#if defined(ANDROID_BACKEND)
+#include "backends/platform/android/adventurepad.h"
+#endif
+
 #include "graphics/cursorman.h"
 #ifdef USE_CLOUD
 #include "backends/cloud/cloudmanager.h"
@@ -83,6 +87,7 @@ enum {
 	kSearchClearCmd = 'SRCL',
 	kSetGroupMethodCmd = 'GPBY',
 	kHelpCmd = 'HELP',
+	kReturnToAdventurePadCmd = 'RTAP',
 
 	kListSwitchCmd = 'LIST',
 	kGridSwitchCmd = 'GRID',
@@ -268,6 +273,14 @@ void LauncherDialog::build() {
 		// I18N: Button Quit ScummVM program. Q is the shortcut, Ctrl+Q, put it in parens for non-latin (~Q~)
 		new ButtonWidget(this, _title + ".QuitButton", _("~Q~uit"), _("Quit ScummVM"), kQuitCmd);
 	}
+
+#if defined(ANDROID_BACKEND)
+	if (Android::isAdventurePadAdvancedLaunch()) {
+		new ButtonWidget(this, _title + ".ReturnToAdventurePadButton",
+			_("Return to AdventurePad"), _("Return to the AdventurePad launcher"),
+			kReturnToAdventurePadCmd);
+	}
+#endif
 
 	// I18N: Button About ScummVM program. b is the shortcut, Ctrl+b, put it in parens for non-latin (~b~)
 	new ButtonWidget(this, _title + ".AboutButton", _("A~b~out"), _("About ScummVM"), kAboutCmd);
@@ -854,6 +867,11 @@ void LauncherDialog::handleCommand(CommandSender *sender, uint32 cmd, uint32 dat
 		ConfMan.setActiveDomain("");
 		setResult(-1);
 		close();
+		break;
+	case kReturnToAdventurePadCmd:
+#if defined(ANDROID_BACKEND)
+		Android::returnToAdventurePad();
+#endif
 		break;
 	case kHelpCmd: {
 		HelpDialog dlg;

@@ -100,6 +100,8 @@ public:
 	static Common::String getScummVMLogPath();
 	static jint getAndroidSDKVersionId();
 	static void setCurrentGame(const Common::String &target);
+	static bool isAdventurePadAdvancedLaunch();
+	static void returnToAdventurePad();
 	static void notifyHTTPService(int localPort, bool minimal);
 
 	static inline bool haveSurface();
@@ -113,6 +115,7 @@ public:
 	static void reportMirrorCursor(int x, int y, bool visible, int64 geometryGeneration);
 	static bool failMirrorSurface(const char *diagnostic);
 	static int64 reportMirrorSourceGeometry(int width, int height, int capability, int orientation);
+	static int64 mirrorGeometryGeneration();
 	static bool updateMirrorCrop(int64 &cropGeneration, int64 &geometryGeneration,
 			float &left, float &top, float &right, float &bottom);
 	static void reportMirrorCropAck(int result, int64 cropGeneration,
@@ -181,6 +184,8 @@ private:
 	static jmethodID _MID_getScummVMConfigPath;
 	static jmethodID _MID_getScummVMLogPath;
 	static jmethodID _MID_setCurrentGame;
+	static jmethodID _MID_isAdventurePadAdvancedLaunch;
+	static jmethodID _MID_returnToAdventurePad;
 	static jmethodID _MID_notifyHTTPService;
 	static jmethodID _MID_getSysArchives;
 	static jmethodID _MID_getAllStorageLocations;
@@ -194,6 +199,7 @@ private:
 	static jmethodID _MID_reportMirrorCursor;
 	static jmethodID _MID_failMirrorSurface;
 	static jmethodID _MID_reportMirrorSourceGeometry;
+	static jmethodID _MID_mirrorGeometryGeneration;
 	static jmethodID _MID_updateMirrorCrop;
 	static jmethodID _MID_reportMirrorCropAck;
 	static jmethodID _MID_updateUpperPresentation;

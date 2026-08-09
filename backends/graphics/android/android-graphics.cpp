@@ -397,17 +397,28 @@ void AndroidGraphicsManager::updateMirrorSourceGeometry() {
 		sourceHeight = 0;
 	}
 	const int orientation = mirrorOrientation(_rotationMode);
+	// Target changes advance the Java protocol generation without changing source dimensions.
+	// Refresh the native validation cache before consuming queued CROP or MODE requests.
+	const int64 publishedGeneration = _mirrorRefreshFramePending ?
+			JNI::mirrorGeometryGeneration() : _mirrorGeometryGeneration;
+	const bool logicalGeometryChanged = publishedGeneration > 0 &&
+			publishedGeneration != _mirrorGeometryGeneration;
 	if (_mirrorSourceWidth == sourceWidth && _mirrorSourceHeight == sourceHeight &&
-			_mirrorSourceOrientation == orientation)
+			_mirrorSourceOrientation == orientation && !logicalGeometryChanged)
 		return;
+	const bool sourceGeometryChanged = _mirrorSourceWidth != sourceWidth ||
+			_mirrorSourceHeight != sourceHeight || _mirrorSourceOrientation != orientation;
 	_mirrorSourceWidth = sourceWidth;
 	_mirrorSourceHeight = sourceHeight;
 	_mirrorSourceOrientation = orientation;
-	_mirrorGeometryGeneration = JNI::reportMirrorSourceGeometry(sourceWidth, sourceHeight, capability,
-			orientation);
+	_mirrorGeometryGeneration = sourceGeometryChanged ?
+			JNI::reportMirrorSourceGeometry(sourceWidth, sourceHeight, capability, orientation) :
+			publishedGeneration;
 	_mirrorCropLeft = _mirrorCropTop = 0.0f;
 	_mirrorCropRight = _mirrorCropBottom = 1.0f;
 	_upperPresentationExpanded = false;
+	_pendingCropAckGeneration = 0;
+	_pendingModeAckGeneration = 0;
 	_forceRedraw = true;
 }
 

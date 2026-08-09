@@ -164,6 +164,10 @@ public abstract class ScummVM implements SurfaceHolder.Callback,
 	/** @noinspection unused */ @Keep
 	abstract protected void setCurrentGame(String target);
 	/** @noinspection unused */ @Keep
+	abstract protected boolean isAdventurePadAdvancedLaunch();
+	/** @noinspection unused */ @Keep
+	abstract protected void returnToAdventurePad();
+	/** @noinspection unused */ @Keep
 	abstract protected void notifyHTTPService(int localPort, boolean minimal);
 	/** @noinspection unused */ @Keep
 	abstract protected String[] getSysArchives();
@@ -219,6 +223,37 @@ public abstract class ScummVM implements SurfaceHolder.Callback,
 					RelativeInputService.getCurrentGameTarget(), _mirror_source_orientation);
 			}
 		}
+	}
+
+	final void restoreMirrorGeometryRegistration(Messenger recipient, String target,
+			int cachedWidth, int cachedHeight, int cachedCapability, int cachedOrientation,
+			long cachedGeneration) {
+		synchronized (_mirror_crop_lock) {
+			_geometry_recipient = recipient;
+			if (recipient == null)
+				return;
+
+			if (_mirror_source_width <= 0 || _mirror_source_height <= 0 ||
+				_mirror_source_capability <= 0) {
+				if (cachedWidth <= 0 || cachedHeight <= 0 || cachedCapability <= 0)
+					return;
+				_mirror_source_width = cachedWidth;
+				_mirror_source_height = cachedHeight;
+				_mirror_source_capability = cachedCapability;
+				_mirror_source_orientation = cachedOrientation;
+			}
+			_mirror_geometry_generation = Math.max(_mirror_geometry_generation, cachedGeneration);
+			invalidateMirrorGeometryLocked();
+			publishMirrorGeometryLocked(target);
+		}
+	}
+
+	final void reportCurrentGameTargetChanged(String target) {
+		synchronized (_mirror_crop_lock) {
+			invalidateMirrorGeometryLocked();
+			publishMirrorGeometryLocked(target);
+		}
+		requestMirrorRefresh("GEOMETRY target=" + target);
 	}
 
 	final void queueMirrorCrop(float left, float top, float right, float bottom,
@@ -498,14 +533,33 @@ public abstract class ScummVM implements SurfaceHolder.Callback,
 				_mirror_source_height = height;
 				_mirror_source_capability = capability;
 				_mirror_source_orientation = orientation;
-				++_mirror_geometry_generation;
-				_pending_mirror_crop = MirrorCropRequest.fallback();
-				_pending_upper_presentation = UpperPresentationRequest.fullFrame();
-				resetAbsoluteSourcePointerLocked();
-				_split_view_active = false;
+				invalidateMirrorGeometryLocked();
 			}
-			MirrorSurfaceProtocol.sendGeometry(_geometry_recipient, width, height, capability,
-					_mirror_geometry_generation, RelativeInputService.getCurrentGameTarget(), orientation);
+			publishMirrorGeometryLocked(RelativeInputService.getCurrentGameTarget());
+			return _mirror_geometry_generation;
+		}
+	}
+
+	private void publishMirrorGeometryLocked(String target) {
+		MirrorSurfaceProtocol.sendGeometry(_geometry_recipient, _mirror_source_width,
+			_mirror_source_height, _mirror_source_capability, _mirror_geometry_generation,
+			target, _mirror_source_orientation);
+		RelativeInputService.rememberMirrorSourceGeometry(this, _mirror_source_width,
+			_mirror_source_height, _mirror_source_capability, _mirror_source_orientation,
+			_mirror_geometry_generation);
+	}
+
+	private void invalidateMirrorGeometryLocked() {
+		++_mirror_geometry_generation;
+		_pending_mirror_crop = MirrorCropRequest.fallback();
+		_pending_upper_presentation = UpperPresentationRequest.fullFrame();
+		resetAbsoluteSourcePointerLocked();
+		_split_view_active = false;
+	}
+
+	@SuppressWarnings("unused") @Keep
+	final protected long mirrorGeometryGeneration() {
+		synchronized (_mirror_crop_lock) {
 			return _mirror_geometry_generation;
 		}
 	}

@@ -246,6 +246,9 @@
 					<widget name = 'QuitButton'
 							type = 'Button'
 					/>
+					<widget name = 'ReturnToAdventurePadButton'
+							type = 'Button'
+					/>
 				</layout>
 			</layout>
 			<layout type = 'horizontal' padding = '0, 0, 6, 0' spacing = '2'>
@@ -343,6 +346,9 @@
 				<widget name = 'StartButton'
 						height = 'Globals.Button.Height'
 				/>
+				<widget name = 'ReturnToAdventurePadButton'
+						height = 'Globals.Button.Height'
+				/>
 			</layout>
 			<layout type = 'horizontal' padding = '0, 0, 6, 0' spacing = '2'>
 				<widget name = 'ListSwitch'
@@ -436,6 +442,9 @@
 						height = 'Globals.Button.Height'
 				/>
 				<widget name = 'QuitButton'
+						height = 'Globals.Button.Height'
+				/>
+				<widget name = 'ReturnToAdventurePadButton'
 						height = 'Globals.Button.Height'
 				/>
 			</layout>
