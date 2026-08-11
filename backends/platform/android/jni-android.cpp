@@ -108,6 +108,7 @@ jmethodID JNI::_MID_getScummVMBasePath;
 jmethodID JNI::_MID_getScummVMConfigPath;
 jmethodID JNI::_MID_getScummVMLogPath;
 jmethodID JNI::_MID_setCurrentGame = 0;
+jmethodID JNI::_MID_setAdventurePadGameViewport = 0;
 jmethodID JNI::_MID_isAdventurePadAdvancedLaunch = 0;
 jmethodID JNI::_MID_returnToAdventurePad = 0;
 jmethodID JNI::_MID_notifyHTTPService = 0;
@@ -606,6 +607,18 @@ void JNI::setCurrentGame(const Common::String &target) {
 	}
 }
 
+void JNI::reportAdventurePadGameViewport(int left, int top, int right, int bottom,
+		int sourceWidth, int sourceHeight) {
+	JNIEnv *env = JNI::getEnv();
+	env->CallVoidMethod(_jobj, _MID_setAdventurePadGameViewport,
+		left, top, right, bottom, sourceWidth, sourceHeight);
+	if (env->ExceptionCheck()) {
+		LOGE("Failed to report AdventurePad game viewport");
+		env->ExceptionDescribe();
+		env->ExceptionClear();
+	}
+}
+
 bool JNI::isAdventurePadAdvancedLaunch() {
 	JNIEnv *env = JNI::getEnv();
 	jboolean advancedLaunch = env->CallBooleanMethod(_jobj, _MID_isAdventurePadAdvancedLaunch);
@@ -1026,6 +1039,7 @@ void JNI::create(JNIEnv *env, jobject self, jobject asset_manager,
 	FIND_METHOD(, getScummVMConfigPath, "()Ljava/lang/String;");
 	FIND_METHOD(, getScummVMLogPath, "()Ljava/lang/String;");
 	FIND_METHOD(, setCurrentGame, "(Ljava/lang/String;)V");
+	FIND_METHOD(, setAdventurePadGameViewport, "(IIIIII)V");
 	FIND_METHOD(, isAdventurePadAdvancedLaunch, "()Z");
 	FIND_METHOD(, returnToAdventurePad, "()V");
 	FIND_METHOD(, notifyHTTPService, "(IZ)V");

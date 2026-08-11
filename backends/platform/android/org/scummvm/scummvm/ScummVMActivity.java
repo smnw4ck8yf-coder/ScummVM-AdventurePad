@@ -103,6 +103,8 @@ public class ScummVMActivity extends Activity {
 	private static final String ADVENTURE_PAD_LOG_TAG = "AdventurePadBridge";
 	private static final String ADVENTURE_PAD_PACKAGE = "com.jamesmoran.adventurepad";
 	private static final String ADVENTURE_PAD_ACTIVITY = "com.jamesmoran.adventurepad.TrackpadActivity";
+	private static final String EXTRA_ADVENTUREPAD_SKIN_CONTEXT =
+		"com.jamesmoran.adventurepad.SKIN_CONTEXT";
 	private static final String[] VIRTUAL_DISPLAY_NAME_MARKERS = {
 		"virtual", "overlay", "screen record", "screenrecord",
 		"screen share", "screenshare", "mirroring"
@@ -161,6 +163,7 @@ public class ScummVMActivity extends Activity {
 	FrameLayout _videoLayout = null;
 
 	private EditableSurfaceView _main_surface = null;
+	private SkinSurroundView _skinSurroundView = null;
 	private GridLayout _buttonLayout = null;
 	private ImageView _toggleTouchModeKeyboardBtnIcon = null;
 	private ImageView _openMenuBtnIcon = null;
@@ -907,6 +910,10 @@ public class ScummVMActivity extends Activity {
 		@Override
 		protected void setCurrentGame(String target) {
 			RelativeInputService.setCurrentGameTarget(target);
+			runOnUiThread(() -> {
+				if (_skinSurroundView != null)
+					_skinSurroundView.setGameTarget(target, _adventurePadAdvancedLaunch);
+			});
 			if (_adventurePadFacadeLaunch) {
 				if (target != null && !target.isEmpty()) {
 					_adventurePadFacadeGameStarted = true;
@@ -932,6 +939,23 @@ public class ScummVMActivity extends Activity {
 			if (target != null) {
 				ShortcutCreatorActivity.pushShortcut(ScummVMActivity.this, target, intent);
 			}
+		}
+
+		@Override
+		protected void setAdventurePadGameViewport(int left, int top, int right, int bottom,
+				int sourceWidth, int sourceHeight) {
+			runOnUiThread(() -> {
+				if (_skinSurroundView != null)
+					_skinSurroundView.setGameViewport(left, top, right, bottom, sourceWidth, sourceHeight);
+			});
+		}
+
+		@Override
+		protected void setAdventurePadSplitViewActive(boolean active) {
+			runOnUiThread(() -> {
+				if (_skinSurroundView != null)
+					_skinSurroundView.setSplitViewActive(active);
+			});
 		}
 
 		@Override
@@ -1166,6 +1190,7 @@ public class ScummVMActivity extends Activity {
 		});
 		_videoLayout = findViewById(R.id.video_layout);
 		_main_surface = findViewById(R.id.main_surface);
+		_skinSurroundView = findViewById(R.id.adventurepad_skin_surround);
 		_buttonLayout = findViewById(R.id.button_layout);
 		_openMenuBtnIcon = findViewById(R.id.open_menu_button);
 		_toggleTouchModeKeyboardBtnIcon = findViewById(R.id.toggle_touch_button);
@@ -1325,7 +1350,9 @@ public class ScummVMActivity extends Activity {
 
 		Intent trackpadIntent = new Intent()
 			.setComponent(new ComponentName(ADVENTURE_PAD_PACKAGE, ADVENTURE_PAD_ACTIVITY))
-			.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+			.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+			.putExtra(EXTRA_ADVENTUREPAD_SKIN_CONTEXT,
+				_adventurePadFacadeLaunch ? "GAMEPLAY" : "ADVANCED_SCUMMVM");
 		boolean launchAllowed;
 		try {
 			launchAllowed = activityManager.isActivityStartAllowedOnDisplay(

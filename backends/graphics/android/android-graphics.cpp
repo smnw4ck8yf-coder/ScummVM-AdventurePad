@@ -126,6 +126,12 @@ AndroidGraphicsManager::AndroidGraphicsManager() :
 	_pendingModeAckGeneration(0),
 	_pendingModeAckGeometryGeneration(0),
 	_pendingModeAckResult(0),
+	_reportedSkinViewportLeft(-1),
+	_reportedSkinViewportTop(-1),
+	_reportedSkinViewportRight(-1),
+	_reportedSkinViewportBottom(-1),
+	_reportedSkinViewportWidth(-1),
+	_reportedSkinViewportHeight(-1),
 	_reportedMirrorCursorX(-1),
 	_reportedMirrorCursorY(-1),
 	_reportedMirrorCursorVisible(false),
@@ -257,6 +263,7 @@ void AndroidGraphicsManager::updateScreen() {
 	if (traceScheduledFrame)
 		logMirrorTextureLifecycle("before primary updateScreen");
 	OpenGLGraphicsManager::updateScreen();
+	updateSkinSurroundViewport();
 	if (traceScheduledFrame) {
 		logMirrorRenderTransition("primary frame returned");
 		logMirrorTextureLifecycle("after primary updateScreen");
@@ -280,6 +287,24 @@ void AndroidGraphicsManager::updateScreen() {
 		_mirrorRefreshFramePending = false;
 		_mirrorCursorFramePending = false;
 	}
+}
+
+void AndroidGraphicsManager::updateSkinSurroundViewport() {
+	Common::Rect viewport = getPresentationGameRect();
+	if (_overlayVisible || viewport.isEmpty())
+		viewport = Common::Rect(0, 0, _windowWidth, _windowHeight);
+	if (viewport.left == _reportedSkinViewportLeft && viewport.top == _reportedSkinViewportTop &&
+			viewport.right == _reportedSkinViewportRight && viewport.bottom == _reportedSkinViewportBottom &&
+			_windowWidth == _reportedSkinViewportWidth && _windowHeight == _reportedSkinViewportHeight)
+		return;
+	_reportedSkinViewportLeft = viewport.left;
+	_reportedSkinViewportTop = viewport.top;
+	_reportedSkinViewportRight = viewport.right;
+	_reportedSkinViewportBottom = viewport.bottom;
+	_reportedSkinViewportWidth = _windowWidth;
+	_reportedSkinViewportHeight = _windowHeight;
+	JNI::reportAdventurePadGameViewport(viewport.left, viewport.top, viewport.right, viewport.bottom,
+		_windowWidth, _windowHeight);
 }
 
 void AndroidGraphicsManager::handleMirrorLifecycleChange() {

@@ -100,6 +100,8 @@ public:
 	static Common::String getScummVMLogPath();
 	static jint getAndroidSDKVersionId();
 	static void setCurrentGame(const Common::String &target);
+	static void reportAdventurePadGameViewport(int left, int top, int right, int bottom,
+			int sourceWidth, int sourceHeight);
 	static bool isAdventurePadAdvancedLaunch();
 	static void returnToAdventurePad();
 	static void notifyHTTPService(int localPort, bool minimal);
@@ -184,6 +186,7 @@ private:
 	static jmethodID _MID_getScummVMConfigPath;
 	static jmethodID _MID_getScummVMLogPath;
 	static jmethodID _MID_setCurrentGame;
+	static jmethodID _MID_setAdventurePadGameViewport;
 	static jmethodID _MID_isAdventurePadAdvancedLaunch;
 	static jmethodID _MID_returnToAdventurePad;
 	static jmethodID _MID_notifyHTTPService;

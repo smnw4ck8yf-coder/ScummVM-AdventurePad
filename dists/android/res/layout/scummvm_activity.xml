@@ -17,6 +17,11 @@
 		android:focusableInTouchMode="true"
 		android:layerType="none" />
 
+	<org.scummvm.scummvm.SkinSurroundView
+		android:id="@+id/adventurepad_skin_surround"
+		android:layout_width="match_parent"
+		android:layout_height="match_parent" />
+
 	<GridLayout
 		android:id="@+id/button_layout"
 		android:layout_width="wrap_content"

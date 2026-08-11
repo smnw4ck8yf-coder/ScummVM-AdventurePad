@@ -78,6 +78,7 @@ private:
 	void renderMirrorSurface();
 	void updateMirrorSourceGeometry();
 	void updateUpperPresentation();
+	void updateSkinSurroundViewport();
 	void logMirrorRenderTransition(const char *stage);
 	void logMirrorTextureLifecycle(const char *stage);
 
@@ -104,6 +105,12 @@ private:
 	int64 _pendingModeAckGeneration;
 	int64 _pendingModeAckGeometryGeneration;
 	int _pendingModeAckResult;
+	int _reportedSkinViewportLeft;
+	int _reportedSkinViewportTop;
+	int _reportedSkinViewportRight;
+	int _reportedSkinViewportBottom;
+	int _reportedSkinViewportWidth;
+	int _reportedSkinViewportHeight;
 	int _reportedMirrorCursorX;
 	int _reportedMirrorCursorY;
 	bool _reportedMirrorCursorVisible;

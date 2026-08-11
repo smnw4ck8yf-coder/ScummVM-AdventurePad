@@ -164,6 +164,11 @@ public abstract class ScummVM implements SurfaceHolder.Callback,
 	/** @noinspection unused */ @Keep
 	abstract protected void setCurrentGame(String target);
 	/** @noinspection unused */ @Keep
+	abstract protected void setAdventurePadGameViewport(int left, int top, int right, int bottom,
+		int sourceWidth, int sourceHeight);
+	/** @noinspection unused */ @Keep
+	abstract protected void setAdventurePadSplitViewActive(boolean active);
+	/** @noinspection unused */ @Keep
 	abstract protected boolean isAdventurePadAdvancedLaunch();
 	/** @noinspection unused */ @Keep
 	abstract protected void returnToAdventurePad();
@@ -280,6 +285,7 @@ public abstract class ScummVM implements SurfaceHolder.Callback,
 			long modeGeneration, long expectedGeometryGeneration, Messenger recipient) {
 		synchronized (_mirror_crop_lock) {
 			_split_view_active = false;
+			setAdventurePadSplitViewActive(mode == 1);
 			resetAbsoluteSourcePointerLocked();
 			_pending_upper_presentation = new UpperPresentationRequest(mode, left, top, right,
 				bottom, modeGeneration, expectedGeometryGeneration, recipient);
@@ -291,6 +297,7 @@ public abstract class ScummVM implements SurfaceHolder.Callback,
 		synchronized (_mirror_crop_lock) {
 			_pending_upper_presentation = UpperPresentationRequest.fullFrame();
 			_split_view_active = false;
+			setAdventurePadSplitViewActive(false);
 			resetAbsoluteSourcePointerLocked();
 		}
 		requestMirrorRefresh("MODE fallback");
@@ -555,6 +562,7 @@ public abstract class ScummVM implements SurfaceHolder.Callback,
 		_pending_upper_presentation = UpperPresentationRequest.fullFrame();
 		resetAbsoluteSourcePointerLocked();
 		_split_view_active = false;
+		setAdventurePadSplitViewActive(false);
 	}
 
 	@SuppressWarnings("unused") @Keep
@@ -651,6 +659,7 @@ public abstract class ScummVM implements SurfaceHolder.Callback,
 			MirrorSurfaceProtocol.sendDisplayModeAck(_upper_presentation_ack_recipient, result,
 				modeGeneration, geometryGeneration, diagnostic);
 			_split_view_active = result == MirrorSurfaceProtocol.MODE_EXPANDED_APPLIED;
+			setAdventurePadSplitViewActive(_split_view_active);
 			if (!_split_view_active)
 				resetAbsoluteSourcePointerLocked();
 			_upper_presentation_ack_recipient = null;
