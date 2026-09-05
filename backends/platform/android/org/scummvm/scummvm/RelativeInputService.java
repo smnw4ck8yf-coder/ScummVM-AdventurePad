@@ -1,9 +1,22 @@
 /* ScummVM - Graphic Adventure Engine
  *
+ * ScummVM is the legal property of its developers, whose names
+ * are too numerous to list here. Please refer to the COPYRIGHT
+ * file distributed with this source distribution.
+ *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
  */
 
 package org.scummvm.scummvm;
@@ -31,6 +44,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.Map;
+import java.util.HashMap;
 
 /** Receives bounded relative pointer deltas from the separately installed AdventurePad app. */
 public final class RelativeInputService extends Service {
@@ -47,16 +61,88 @@ public final class RelativeInputService extends Service {
 	private static final int MSG_LAUNCH_GAME_TARGET = 201;
 	private static final int MSG_OPEN_SCUMMVM_LIBRARY = 202;
 	private static final int MSG_GAME_LIBRARY = 203;
+	private static final int MSG_RESUME_GAME_TARGET = 204;
+	private static final int MSG_LOAD_GAME_TARGET = 205;
+	private static final int MSG_REFRESH_SAVE_CAPABILITIES = 206;
+	private static final int MSG_ADD_GAME = 207;
+	private static final int MSG_REMOVE_GAME_TARGET = 208;
+	private static final int MSG_REMOVE_GAME_RESULT = 209;
 	private static final String KEY_TARGETS = "targets";
 	private static final String KEY_TARGET_ID = "targetId";
 	private static final String KEY_TITLE = "title";
 	private static final String KEY_ENGINE_ID = "engineId";
 	private static final String KEY_GAME_ID = "gameId";
 	private static final String KEY_ERROR = "error";
+	private static final String KEY_RESUME_SAVE_SLOT = "resumeSaveSlot";
+	private static final String KEY_RESUME_UNAVAILABLE_REASON = "resumeUnavailableReason";
+	private static final String KEY_LOAD_GAME_AVAILABLE = "loadGameAvailable";
+	private static final String KEY_SAVE_CAPABILITIES_READY = "saveCapabilitiesReady";
+	private static final String KEY_REMOVED = "removed";
 	private static final String EXTRA_ADVENTUREPAD_FACADE =
 		"org.scummvm.scummvm.extra.ADVENTUREPAD_FACADE";
 	private static final String EXTRA_ADVENTUREPAD_ADVANCED =
 		"org.scummvm.scummvm.extra.ADVENTUREPAD_ADVANCED";
+	private static final String EXTRA_ADVENTUREPAD_ADD_GAME =
+		"org.scummvm.scummvm.extra.ADVENTUREPAD_ADD_GAME";
+	private static final String EXTRA_ADVENTUREPAD_LOAD_TARGET =
+		"org.scummvm.scummvm.extra.ADVENTUREPAD_LOAD_TARGET";
+	private static final String EXTRA_ADVENTUREPAD_SAVE_SLOT =
+		"org.scummvm.scummvm.extra.ADVENTUREPAD_SAVE_SLOT";
+	private static final String EXTRA_ADVENTUREPAD_SAVE_CAPABILITY_REFRESH =
+		"org.scummvm.scummvm.extra.ADVENTUREPAD_SAVE_CAPABILITY_REFRESH";
+	private static final String EXTRA_ADVENTUREPAD_REMOVE_TARGET =
+		"org.scummvm.scummvm.extra.ADVENTUREPAD_REMOVE_TARGET";
+	private static final Map<String, SaveCapability> _saveCapabilities = new HashMap<>();
+	private static boolean _saveCapabilitiesReady;
+	private static boolean _saveCapabilityRefreshInFlight;
+	private static boolean _nativeStartupInProgress;
+	private static volatile RelativeInputService _activeService;
+	private Messenger _libraryRecipient;
+
+	private static final class SaveCapability {
+		final int latestSlot;
+		final boolean loadAvailable;
+		final String unavailableReason;
+
+		SaveCapability(int latestSlot, boolean loadAvailable, String unavailableReason) {
+			this.latestSlot = latestSlot;
+			this.loadAvailable = loadAvailable;
+			this.unavailableReason = unavailableReason;
+		}
+	}
+
+	static synchronized void beginSaveCapabilities() {
+		_saveCapabilities.clear();
+		_saveCapabilitiesReady = false;
+		_saveCapabilityRefreshInFlight = true;
+	}
+
+	static synchronized void reportSaveCapability(String target, int latestSlot,
+			boolean loadAvailable, String unavailableReason) {
+		_saveCapabilities.put(target, new SaveCapability(latestSlot, loadAvailable, unavailableReason));
+	}
+
+	static synchronized void finishSaveCapabilities() {
+		_saveCapabilitiesReady = true;
+		_saveCapabilityRefreshInFlight = false;
+		RelativeInputService service = _activeService;
+		if (service != null)
+			new Handler(Looper.getMainLooper()).post(() ->
+				service._incomingHandler.replyWithGameLibrary(service._libraryRecipient));
+	}
+
+	static synchronized void setNativeStartupInProgress(boolean inProgress) {
+		_nativeStartupInProgress = inProgress;
+	}
+
+	static synchronized void finishGameRemoval(String target, boolean removed, String error) {
+		if (removed)
+			_saveCapabilities.remove(target);
+		RelativeInputService service = _activeService;
+		if (service != null)
+			new Handler(Looper.getMainLooper()).post(() ->
+				service._incomingHandler.finishGameRemoval(target, removed, error));
+	}
 	private static final float MAX_ABSOLUTE_DELTA = 512.0f;
 	private static final double JE_BALL_UNITS_PER_PIXEL = 50.0;
 	private static final int JOYSTICK_AXIS_MAX = 32767;
@@ -102,7 +188,8 @@ public final class RelativeInputService extends Service {
 	private long _activeMirrorGeneration;
 	private long _latestCropGeneration;
 	private long _latestModeGeneration;
-	private final Messenger _messenger = new Messenger(new IncomingHandler(Looper.getMainLooper()));
+	private final IncomingHandler _incomingHandler = new IncomingHandler(Looper.getMainLooper());
+	private final Messenger _messenger = new Messenger(_incomingHandler);
 
 	static void attachNativeEventSink(ScummVM sink) {
 		Messenger geometryRecipient;
@@ -151,6 +238,7 @@ public final class RelativeInputService extends Service {
 
 	@Override
 	public IBinder onBind(Intent intent) {
+		_activeService = this;
 		Log.i(TAG, "AdventurePad Messenger bound");
 		return _messenger.getBinder();
 	}
@@ -165,6 +253,8 @@ public final class RelativeInputService extends Service {
 
 	@Override
 	public void onDestroy() {
+		if (_activeService == this)
+			_activeService = null;
 		detachMirrorForDisconnect();
 		releaseForwardedInput();
 		_fractionalResidualX = 0.0;
@@ -209,6 +299,22 @@ public final class RelativeInputService extends Service {
 			case MSG_OPEN_SCUMMVM_LIBRARY:
 				openScummVMLibrary();
 				return;
+			case MSG_RESUME_GAME_TARGET:
+				resumeGameTarget(message.getData().getString(KEY_TARGET_ID),
+					message.getData().getInt(KEY_RESUME_SAVE_SLOT, -1));
+				return;
+			case MSG_LOAD_GAME_TARGET:
+				openLoadGame(message.getData().getString(KEY_TARGET_ID));
+				return;
+			case MSG_REFRESH_SAVE_CAPABILITIES:
+				requestSaveCapabilityRefresh(message.replyTo);
+				return;
+			case MSG_ADD_GAME:
+				openAddGame();
+				return;
+			case MSG_REMOVE_GAME_TARGET:
+				removeGameTarget(message);
+				return;
 			case MirrorSurfaceProtocol.MSG_ATTACH_SURFACE:
 				attachMirrorSurface(message);
 				return;
@@ -235,7 +341,11 @@ public final class RelativeInputService extends Service {
 		private void replyWithGameLibrary(Messenger recipient) {
 			if (recipient == null)
 				return;
+			_libraryRecipient = recipient;
 			Bundle reply = new Bundle();
+			synchronized (RelativeInputService.class) {
+				reply.putBoolean(KEY_SAVE_CAPABILITIES_READY, _saveCapabilitiesReady);
+			}
 			ArrayList<Bundle> targets = new ArrayList<>();
 			try (FileReader reader = new FileReader(new File(getFilesDir(), "scummvm.ini"))) {
 				Map<String, Map<String, String>> config = INIParser.parse(reader);
@@ -251,6 +361,15 @@ public final class RelativeInputService extends Service {
 					target.putString(KEY_TITLE, valueOrDefault(values, "description", section.getKey()));
 					target.putString(KEY_ENGINE_ID, valueOrDefault(values, "engineid", ""));
 					target.putString(KEY_GAME_ID, gameId);
+					SaveCapability capability;
+					synchronized (RelativeInputService.class) {
+						capability = _saveCapabilities.get(section.getKey());
+					}
+					if (capability != null) {
+						target.putInt(KEY_RESUME_SAVE_SLOT, capability.latestSlot);
+						target.putBoolean(KEY_LOAD_GAME_AVAILABLE, capability.loadAvailable);
+						target.putString(KEY_RESUME_UNAVAILABLE_REASON, capability.unavailableReason);
+					}
 					targets.add(target);
 				}
 				Collections.sort(targets, new Comparator<Bundle>() {
@@ -274,6 +393,48 @@ public final class RelativeInputService extends Service {
 				recipient.send(response);
 			} catch (android.os.RemoteException exception) {
 				Log.w(TAG, "AdventurePad library reply failed", exception);
+			}
+		}
+
+		private void requestSaveCapabilityRefresh(Messenger recipient) {
+			if (recipient != null)
+				_libraryRecipient = recipient;
+			boolean replyFromCurrentMap = false;
+			boolean launchRefresh = false;
+			synchronized (RelativeInputService.class) {
+				if (_saveCapabilitiesReady) {
+					replyFromCurrentMap = true;
+				} else if (_saveCapabilityRefreshInFlight) {
+					Log.i(TAG, "Coalesced duplicate save-capability refresh request");
+					return;
+				} else {
+					_saveCapabilityRefreshInFlight = true;
+					if (_nativeEventSink == null && !_nativeStartupInProgress)
+						launchRefresh = true;
+					else
+						Log.i(TAG, "Deferred save-capability refresh until native initialization is safe");
+				}
+			}
+			if (replyFromCurrentMap) {
+				replyWithGameLibrary(recipient);
+				return;
+			}
+			if (!launchRefresh)
+				return;
+
+			Intent intent = new Intent(Intent.ACTION_MAIN);
+			intent.setComponent(new ComponentName(RelativeInputService.this, ScummVMActivity.class));
+			intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_HISTORY |
+				Intent.FLAG_ACTIVITY_NO_ANIMATION);
+			intent.putExtra(EXTRA_ADVENTUREPAD_SAVE_CAPABILITY_REFRESH, true);
+			try {
+				Log.i(TAG, "Starting hidden native save-capability refresh");
+				startActivity(intent);
+			} catch (RuntimeException exception) {
+				synchronized (RelativeInputService.class) {
+					_saveCapabilityRefreshInFlight = false;
+				}
+				Log.e(TAG, "Could not start native save-capability refresh", exception);
 			}
 		}
 
@@ -302,6 +463,94 @@ public final class RelativeInputService extends Service {
 			// after the native launcher had already decided which widgets to create.
 			intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
 			intent.putExtra(EXTRA_ADVENTUREPAD_ADVANCED, true);
+			startActivity(intent);
+		}
+
+		private void openAddGame() {
+			Intent intent = new Intent(Intent.ACTION_MAIN);
+			intent.setComponent(new ComponentName(RelativeInputService.this, ScummVMActivity.class));
+			// Start a fresh native instance so the one-shot launch flag is available
+			// before the ScummVM launcher is constructed.
+			intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+			intent.putExtra(EXTRA_ADVENTUREPAD_ADVANCED, true);
+			intent.putExtra(EXTRA_ADVENTUREPAD_ADD_GAME, true);
+			startActivity(intent);
+		}
+
+		private void removeGameTarget(Message message) {
+			String targetId = message.getData().getString(KEY_TARGET_ID);
+			if (targetId == null || targetId.isEmpty()) {
+				replyWithGameRemoval(message.replyTo, targetId, false, "The selected target is invalid.");
+				return;
+			}
+			String activeTarget = getCurrentGameTarget();
+			if (activeTarget != null && !activeTarget.isEmpty()) {
+				replyWithGameRemoval(message.replyTo, targetId, false,
+					"Remove Game is unavailable while a game is active.");
+				return;
+			}
+			_libraryRecipient = message.replyTo;
+			Intent intent = new Intent(Intent.ACTION_MAIN);
+			intent.setComponent(new ComponentName(RelativeInputService.this, ScummVMActivity.class));
+			intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK |
+				Intent.FLAG_ACTIVITY_NO_HISTORY | Intent.FLAG_ACTIVITY_NO_ANIMATION);
+			intent.putExtra(EXTRA_ADVENTUREPAD_REMOVE_TARGET, targetId);
+			try {
+				startActivity(intent);
+			} catch (RuntimeException exception) {
+				Log.e(TAG, "Could not start native game removal", exception);
+				replyWithGameRemoval(message.replyTo, targetId, false,
+					"ScummVM could not remove the configured target.");
+			}
+		}
+
+		private void finishGameRemoval(String target, boolean removed, String error) {
+			replyWithGameRemoval(_libraryRecipient, target, removed, error);
+			if (removed)
+				replyWithGameLibrary(_libraryRecipient);
+		}
+
+		private void replyWithGameRemoval(Messenger recipient, String target, boolean removed,
+				String error) {
+			if (recipient == null)
+				return;
+			Bundle result = new Bundle();
+			result.putString(KEY_TARGET_ID, target == null ? "" : target);
+			result.putBoolean(KEY_REMOVED, removed);
+			if (error != null && !error.isEmpty())
+				result.putString(KEY_ERROR, error);
+			Message response = Message.obtain(null, MSG_REMOVE_GAME_RESULT);
+			response.setData(result);
+			try {
+				recipient.send(response);
+			} catch (android.os.RemoteException exception) {
+				Log.w(TAG, "AdventurePad removal reply failed", exception);
+			}
+		}
+
+		private void resumeGameTarget(String targetId, int saveSlot) {
+			if (targetId == null || targetId.isEmpty() || saveSlot < 0) {
+				Log.w(TAG, "Rejected invalid AdventurePad resume request");
+				return;
+			}
+			Intent intent = new Intent(Intent.ACTION_MAIN, Uri.fromParts("scummvm", targetId, null));
+			intent.setComponent(new ComponentName(RelativeInputService.this, ScummVMActivity.class));
+			intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+			intent.putExtra(EXTRA_ADVENTUREPAD_FACADE, true);
+			intent.putExtra(EXTRA_ADVENTUREPAD_SAVE_SLOT, saveSlot);
+			startActivity(intent);
+		}
+
+		private void openLoadGame(String targetId) {
+			if (targetId == null || targetId.isEmpty()) {
+				Log.w(TAG, "Rejected blank AdventurePad load request");
+				return;
+			}
+			Intent intent = new Intent(Intent.ACTION_MAIN);
+			intent.setComponent(new ComponentName(RelativeInputService.this, ScummVMActivity.class));
+			intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+			intent.putExtra(EXTRA_ADVENTUREPAD_ADVANCED, true);
+			intent.putExtra(EXTRA_ADVENTUREPAD_LOAD_TARGET, targetId);
 			startActivity(intent);
 		}
 

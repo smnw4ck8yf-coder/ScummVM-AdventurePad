@@ -189,9 +189,23 @@ public class ScummVMActivity extends Activity {
 		"org.scummvm.scummvm.extra.ADVENTUREPAD_FACADE";
 	private static final String EXTRA_ADVENTUREPAD_ADVANCED =
 		"org.scummvm.scummvm.extra.ADVENTUREPAD_ADVANCED";
+	private static final String EXTRA_ADVENTUREPAD_ADD_GAME =
+		"org.scummvm.scummvm.extra.ADVENTUREPAD_ADD_GAME";
+	private static final String EXTRA_ADVENTUREPAD_LOAD_TARGET =
+		"org.scummvm.scummvm.extra.ADVENTUREPAD_LOAD_TARGET";
+	private static final String EXTRA_ADVENTUREPAD_SAVE_SLOT =
+		"org.scummvm.scummvm.extra.ADVENTUREPAD_SAVE_SLOT";
+	private static final String EXTRA_ADVENTUREPAD_SAVE_CAPABILITY_REFRESH =
+		"org.scummvm.scummvm.extra.ADVENTUREPAD_SAVE_CAPABILITY_REFRESH";
+	private static final String EXTRA_ADVENTUREPAD_REMOVE_TARGET =
+		"org.scummvm.scummvm.extra.ADVENTUREPAD_REMOVE_TARGET";
 	private boolean _adventurePadFacadeLaunch = false;
 	private boolean _adventurePadFacadeGameStarted = false;
 	private volatile boolean _adventurePadAdvancedLaunch = false;
+	private volatile boolean _adventurePadAddGameLaunch = false;
+	private volatile boolean _adventurePadSaveCapabilityRefreshLaunch = false;
+	private volatile String _adventurePadRemoveTarget;
+	private volatile String _adventurePadLoadTarget;
 
 	private final int[][] TextInputKeyboardList =
 	{
@@ -964,6 +978,52 @@ public class ScummVMActivity extends Activity {
 		}
 
 		@Override
+		protected boolean isAdventurePadAddGameLaunch() {
+			return _adventurePadAddGameLaunch;
+		}
+
+		@Override
+		protected boolean isAdventurePadSaveCapabilityRefreshLaunch() {
+			return _adventurePadSaveCapabilityRefreshLaunch;
+		}
+
+		@Override
+		protected String getAdventurePadLoadTarget() {
+			String target = _adventurePadLoadTarget;
+			_adventurePadLoadTarget = null;
+			return target;
+		}
+
+		@Override
+		protected String getAdventurePadRemoveTarget() {
+			String target = _adventurePadRemoveTarget;
+			_adventurePadRemoveTarget = null;
+			return target;
+		}
+
+		@Override
+		protected void beginAdventurePadSaveCapabilities() {
+			RelativeInputService.beginSaveCapabilities();
+		}
+
+		@Override
+		protected void reportAdventurePadSaveCapability(String target, int latestSlot,
+				boolean loadAvailable, String resumeUnavailableReason) {
+			RelativeInputService.reportSaveCapability(target, latestSlot, loadAvailable,
+				resumeUnavailableReason);
+		}
+
+		@Override
+		protected void finishAdventurePadSaveCapabilities() {
+			RelativeInputService.finishSaveCapabilities();
+		}
+
+		@Override
+		protected void finishAdventurePadGameRemoval(String target, boolean removed, String error) {
+			RelativeInputService.finishGameRemoval(target, removed, error);
+		}
+
+		@Override
 		protected void returnToAdventurePad() {
 			_adventurePadAdvancedLaunch = false;
 			runOnUiThread(new Runnable() {
@@ -1167,11 +1227,30 @@ public class ScummVMActivity extends Activity {
 	@Override
 	public void onCreate(Bundle savedInstanceState) {
 //		Log.d(ScummVM.LOG_TAG, "onCreate: " + getIntent().getData());
-		Log.i(ADVENTURE_PAD_LOG_TAG, "ScummVMActivity onCreate entered");
 
+		_adventurePadSaveCapabilityRefreshLaunch = getIntent().getBooleanExtra(
+			EXTRA_ADVENTUREPAD_SAVE_CAPABILITY_REFRESH, false);
+		_adventurePadRemoveTarget = getIntent().getStringExtra(EXTRA_ADVENTUREPAD_REMOVE_TARGET);
+		boolean adventurePadBridgeOnlyLaunch = _adventurePadSaveCapabilityRefreshLaunch ||
+			(_adventurePadRemoveTarget != null && !_adventurePadRemoveTarget.isEmpty());
+		RelativeInputService.setNativeStartupInProgress(true);
+		if (adventurePadBridgeOnlyLaunch)
+			setTheme(R.style.SaveCapabilityRefreshTheme);
 		super.onCreate(savedInstanceState);
+		if (adventurePadBridgeOnlyLaunch) {
+			WindowManager.LayoutParams attributes = getWindow().getAttributes();
+			attributes.alpha = 0.0f;
+			getWindow().setAttributes(attributes);
+			getWindow().setDimAmount(0.0f);
+		}
 		_adventurePadFacadeLaunch = getIntent().getBooleanExtra(EXTRA_ADVENTUREPAD_FACADE, false);
 		_adventurePadAdvancedLaunch = getIntent().getBooleanExtra(EXTRA_ADVENTUREPAD_ADVANCED, false);
+		_adventurePadAddGameLaunch = getIntent().getBooleanExtra(EXTRA_ADVENTUREPAD_ADD_GAME, false);
+		_adventurePadLoadTarget = getIntent().getStringExtra(EXTRA_ADVENTUREPAD_LOAD_TARGET);
+		// The shared target is the authoritative lower-screen context. Clear any target cached
+		// from the preceding engine before publishing this management session to AdventurePad.
+		if (!_adventurePadFacadeLaunch && !adventurePadBridgeOnlyLaunch)
+			RelativeInputService.setCurrentGameTarget("");
 
 		setLogFile();
 
@@ -1180,14 +1259,14 @@ public class ScummVMActivity extends Activity {
 		getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
 		setContentView(R.layout.scummvm_activity);
-		Log.i(ADVENTURE_PAD_LOG_TAG, "scheduling trackpad launch");
-		new Handler(Looper.getMainLooper()).post(new Runnable() {
-			@Override
-			public void run() {
-				Log.i(ADVENTURE_PAD_LOG_TAG, "trackpad launch runnable entered");
-				launchAdventurePadOnce();
-			}
-		});
+		if (!adventurePadBridgeOnlyLaunch) {
+			new Handler(Looper.getMainLooper()).post(new Runnable() {
+				@Override
+				public void run() {
+					launchAdventurePadOnce();
+				}
+			});
+		}
 		_videoLayout = findViewById(R.id.video_layout);
 		_main_surface = findViewById(R.id.main_surface);
 		_skinSurroundView = findViewById(R.id.adventurepad_skin_surround);
@@ -1270,9 +1349,16 @@ public class ScummVMActivity extends Activity {
 		// Start ScummVM
 		final Uri intentData = getIntent().getData();
 		String[] args;
+		int saveSlot = getIntent().getIntExtra(EXTRA_ADVENTUREPAD_SAVE_SLOT, -1);
 		if (intentData == null) {
 			args = new String[]{
 				"ScummVM"
+			};
+		} else if (saveSlot >= 0) {
+			args = new String[]{
+				"ScummVM",
+				"--save-slot=" + saveSlot,
+				intentData.getSchemeSpecificPart()
 			};
 		} else {
 			args = new String[]{
@@ -1352,7 +1438,7 @@ public class ScummVMActivity extends Activity {
 			.setComponent(new ComponentName(ADVENTURE_PAD_PACKAGE, ADVENTURE_PAD_ACTIVITY))
 			.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 			.putExtra(EXTRA_ADVENTUREPAD_SKIN_CONTEXT,
-				_adventurePadFacadeLaunch ? "GAMEPLAY" : "ADVANCED_SCUMMVM");
+				_adventurePadFacadeLaunch ? "GAMEPLAY" : "LAUNCHER");
 		boolean launchAllowed;
 		try {
 			launchAllowed = activityManager.isActivityStartAllowedOnDisplay(
@@ -1453,8 +1539,16 @@ public class ScummVMActivity extends Activity {
 		_adventurePadFacadeLaunch = intent.getBooleanExtra(EXTRA_ADVENTUREPAD_FACADE, false);
 		_adventurePadFacadeGameStarted = false;
 		_adventurePadAdvancedLaunch = intent.getBooleanExtra(EXTRA_ADVENTUREPAD_ADVANCED, false);
+		_adventurePadAddGameLaunch = intent.getBooleanExtra(EXTRA_ADVENTUREPAD_ADD_GAME, false);
+		_adventurePadSaveCapabilityRefreshLaunch = intent.getBooleanExtra(
+			EXTRA_ADVENTUREPAD_SAVE_CAPABILITY_REFRESH, false);
+		_adventurePadRemoveTarget = intent.getStringExtra(EXTRA_ADVENTUREPAD_REMOVE_TARGET);
+		_adventurePadLoadTarget = intent.getStringExtra(EXTRA_ADVENTUREPAD_LOAD_TARGET);
 
 		Uri intentData = intent.getData();
+		if (!_adventurePadFacadeLaunch && intentData == null &&
+			(_adventurePadRemoveTarget == null || _adventurePadRemoveTarget.isEmpty()))
+			RelativeInputService.setCurrentGameTarget("");
 
 		// No specific game, we just continue
 		if (intentData == null) {
@@ -1462,7 +1556,8 @@ public class ScummVMActivity extends Activity {
 		}
 
 		// Same game requested, we continue too
-		if (intentData.equals(getIntent().getData())) {
+		if (intentData.equals(getIntent().getData()) &&
+				intent.getIntExtra(EXTRA_ADVENTUREPAD_SAVE_SLOT, -1) < 0) {
 			return;
 		}
 
@@ -1496,9 +1591,11 @@ public class ScummVMActivity extends Activity {
 
 		_finishing = false;
 
-		String[] args = new String[]{
-			"ScummVM",
-			intentData.getSchemeSpecificPart()
+		int saveSlot = intent.getIntExtra(EXTRA_ADVENTUREPAD_SAVE_SLOT, -1);
+		String[] args = saveSlot >= 0 ? new String[]{
+			"ScummVM", "--save-slot=" + saveSlot, intentData.getSchemeSpecificPart()
+		} : new String[]{
+			"ScummVM", intentData.getSchemeSpecificPart()
 		};
 		_scummvm.setArgs(args);
 
@@ -1589,6 +1686,10 @@ public class ScummVMActivity extends Activity {
 		}
 
 		showToggleOnScreenBtnIcons(0);
+		RelativeInputService.setNativeStartupInProgress(false);
+		if (_adventurePadSaveCapabilityRefreshLaunch ||
+			(_adventurePadRemoveTarget != null && !_adventurePadRemoveTarget.isEmpty()))
+			overridePendingTransition(0, 0);
 	}
 
 

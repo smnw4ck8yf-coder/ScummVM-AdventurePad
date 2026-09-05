@@ -38,6 +38,9 @@
 
 namespace GUI {
 
+/** Remove configured game domains using the launcher's authoritative removal path. */
+bool removeGameConfigurations(const Common::StringArray &domainsToRemove);
+
 enum LauncherDisplayType {
 	kLauncherDisplayList = 1,
 	kLauncherDisplayGrid = 2
@@ -117,6 +120,7 @@ public:
 	virtual LauncherDisplayType getType() const = 0;
 
 	int run();
+	void runAddGame();
 
 	void handleKeyDown(Common::KeyState state) override;
 	void handleKeyUp(Common::KeyState state) override;
@@ -297,6 +301,7 @@ public:
 	~LauncherChooser();
 
 	int runModal();
+	void runAddGame();
 	void selectLauncher();
 };
 

@@ -103,6 +103,16 @@ public:
 	static void reportAdventurePadGameViewport(int left, int top, int right, int bottom,
 			int sourceWidth, int sourceHeight);
 	static bool isAdventurePadAdvancedLaunch();
+	static bool isAdventurePadAddGameLaunch();
+	static bool isAdventurePadSaveCapabilityRefreshLaunch();
+	static Common::String getAdventurePadLoadTarget();
+	static Common::String getAdventurePadRemoveTarget();
+	static void beginAdventurePadSaveCapabilities();
+	static void reportAdventurePadSaveCapability(const Common::String &target, int latestSlot,
+			bool loadAvailable, const Common::String &resumeUnavailableReason);
+	static void finishAdventurePadSaveCapabilities();
+	static void finishAdventurePadGameRemoval(const Common::String &target, bool removed,
+			const Common::String &error);
 	static void returnToAdventurePad();
 	static void notifyHTTPService(int localPort, bool minimal);
 
@@ -188,6 +198,14 @@ private:
 	static jmethodID _MID_setCurrentGame;
 	static jmethodID _MID_setAdventurePadGameViewport;
 	static jmethodID _MID_isAdventurePadAdvancedLaunch;
+	static jmethodID _MID_isAdventurePadAddGameLaunch;
+	static jmethodID _MID_isAdventurePadSaveCapabilityRefreshLaunch;
+	static jmethodID _MID_getAdventurePadLoadTarget;
+	static jmethodID _MID_getAdventurePadRemoveTarget;
+	static jmethodID _MID_beginAdventurePadSaveCapabilities;
+	static jmethodID _MID_reportAdventurePadSaveCapability;
+	static jmethodID _MID_finishAdventurePadSaveCapabilities;
+	static jmethodID _MID_finishAdventurePadGameRemoval;
 	static jmethodID _MID_returnToAdventurePad;
 	static jmethodID _MID_notifyHTTPService;
 	static jmethodID _MID_getSysArchives;

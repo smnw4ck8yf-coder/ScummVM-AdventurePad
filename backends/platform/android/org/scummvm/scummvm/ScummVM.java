@@ -64,9 +64,6 @@ public abstract class ScummVM implements SurfaceHolder.Callback,
 	private int _mirror_surface_width;
 	private int _mirror_surface_height;
 	private Messenger _mirror_status_recipient;
-	private int _mirror_diagnostic_frames_remaining;
-	private int _mirror_slow_swap_logs_remaining;
-	private int _mirror_render_log_count;
 	private volatile boolean _mirror_disabled_for_session;
 	private final Object _mirror_crop_lock = new Object();
 	private MirrorCropRequest _pending_mirror_crop;
@@ -170,6 +167,23 @@ public abstract class ScummVM implements SurfaceHolder.Callback,
 	abstract protected void setAdventurePadSplitViewActive(boolean active);
 	/** @noinspection unused */ @Keep
 	abstract protected boolean isAdventurePadAdvancedLaunch();
+	/** @noinspection unused */ @Keep
+	abstract protected boolean isAdventurePadAddGameLaunch();
+	/** @noinspection unused */ @Keep
+	abstract protected boolean isAdventurePadSaveCapabilityRefreshLaunch();
+	/** @noinspection unused */ @Keep
+	abstract protected String getAdventurePadLoadTarget();
+	/** @noinspection unused */ @Keep
+	abstract protected String getAdventurePadRemoveTarget();
+	/** @noinspection unused */ @Keep
+	abstract protected void beginAdventurePadSaveCapabilities();
+	/** @noinspection unused */ @Keep
+	abstract protected void reportAdventurePadSaveCapability(String target, int latestSlot,
+		boolean loadAvailable, String resumeUnavailableReason);
+	/** @noinspection unused */ @Keep
+	abstract protected void finishAdventurePadSaveCapabilities();
+	/** @noinspection unused */ @Keep
+	abstract protected void finishAdventurePadGameRemoval(String target, boolean removed, String error);
 	/** @noinspection unused */ @Keep
 	abstract protected void returnToAdventurePad();
 	/** @noinspection unused */ @Keep
@@ -304,11 +318,6 @@ public abstract class ScummVM implements SurfaceHolder.Callback,
 	}
 
 	private void requestMirrorRefresh(String reason) {
-		if (_mirror_render_log_count < 64) {
-			++_mirror_render_log_count;
-			Log.i("AdventurePadRender", "event=" + _mirror_render_log_count +
-				"/64 protocol queued " + reason + "; pushing JE_MIRROR_REFRESH");
-		}
 		pushEvent(ScummVMEvents.JE_MIRROR_REFRESH, 0, 0, 0, 0, 0, 0);
 	}
 
@@ -504,12 +513,6 @@ public abstract class ScummVM implements SurfaceHolder.Callback,
 			_mirror_surface_width = request.width;
 			_mirror_surface_height = request.height;
 			_mirror_status_recipient = request.statusRecipient;
-			_mirror_diagnostic_frames_remaining = 8;
-			_mirror_slow_swap_logs_remaining = 4;
-			Log.i("AdventurePadMirror", "Created mirror EGLSurface generation=" +
-				request.generation + " primary=" + _egl_surface + " mirror=" +
-				_egl_mirror_surface + " eglError=0x" + Integer.toHexString(createError) +
-				" current=" + currentEglSurfaces());
 			MirrorSurfaceProtocol.sendStatus(_mirror_status_recipient,
 				MirrorSurfaceProtocol.STATUS_ATTACHED, _mirror_surface_generation,
 				"Secondary EGLSurface attached");
@@ -725,33 +728,23 @@ public abstract class ScummVM implements SurfaceHolder.Callback,
 
 	@SuppressWarnings("unused") @Keep
 	final protected boolean makeMirrorSurfaceCurrent() {
-		String currentBefore = _mirror_diagnostic_frames_remaining > 0 ? currentEglSurfaces() : "not-sampled";
 		boolean result = _egl_mirror_surface != EGL10.EGL_NO_SURFACE &&
 			_egl.eglMakeCurrent(_egl_display, _egl_mirror_surface, _egl_mirror_surface, _egl_context);
 		int error = _egl.eglGetError();
-		if (_mirror_diagnostic_frames_remaining > 0 || !result) {
-			Log.i("AdventurePadMirror", "eglMakeCurrent(mirror) result=" + result +
-				" eglError=0x" + Integer.toHexString(error) + " primary=" + _egl_surface +
-				" mirror=" + _egl_mirror_surface + " before=" + currentBefore +
-				" after=" + currentEglSurfaces());
-		}
+		if (!result || error != EGL10.EGL_SUCCESS)
+			Log.e(LOG_TAG, "Could not make the AdventurePad mirror surface current: 0x" +
+				Integer.toHexString(error));
 		return result && error == EGL10.EGL_SUCCESS;
 	}
 
 	@SuppressWarnings("unused") @Keep
 	final protected boolean makePrimarySurfaceCurrent() {
-		String currentBefore = _mirror_diagnostic_frames_remaining > 0 ? currentEglSurfaces() : "not-sampled";
 		boolean result = _egl_surface != EGL10.EGL_NO_SURFACE &&
 			_egl.eglMakeCurrent(_egl_display, _egl_surface, _egl_surface, _egl_context);
 		int error = _egl.eglGetError();
-		if (_mirror_diagnostic_frames_remaining > 0 || !result) {
-			Log.i("AdventurePadMirror", "eglMakeCurrent(primary) result=" + result +
-				" eglError=0x" + Integer.toHexString(error) + " primary=" + _egl_surface +
-				" mirror=" + _egl_mirror_surface + " before=" + currentBefore +
-				" after=" + currentEglSurfaces());
-		}
-		if (_mirror_diagnostic_frames_remaining > 0)
-			--_mirror_diagnostic_frames_remaining;
+		if (!result || error != EGL10.EGL_SUCCESS)
+			Log.e(LOG_TAG, "Could not restore the primary surface: 0x" +
+				Integer.toHexString(error));
 		return result && error == EGL10.EGL_SUCCESS;
 	}
 
@@ -759,18 +752,11 @@ public abstract class ScummVM implements SurfaceHolder.Callback,
 	final protected boolean swapMirrorSurface() {
 		if (_egl_mirror_surface == EGL10.EGL_NO_SURFACE)
 			return false;
-		long startedNanos = System.nanoTime();
 		boolean swapped = _egl.eglSwapBuffers(_egl_display, _egl_mirror_surface);
 		int error = _egl.eglGetError();
-		long durationMicros = (System.nanoTime() - startedNanos) / 1000L;
-		boolean logSlowSwap = durationMicros > 20000L && _mirror_slow_swap_logs_remaining > 0;
-		if (_mirror_diagnostic_frames_remaining > 0 || logSlowSwap || !swapped) {
-			Log.i("AdventurePadMirror", "Mirror swap generation=" + _mirror_surface_generation +
-				" durationUs=" + durationMicros + " success=" + swapped + " eglError=0x" +
-				Integer.toHexString(error) + " current=" + currentEglSurfaces());
-			if (logSlowSwap)
-				--_mirror_slow_swap_logs_remaining;
-		}
+		if (!swapped || error != EGL10.EGL_SUCCESS)
+			Log.e(LOG_TAG, "Could not swap the AdventurePad mirror surface: 0x" +
+				Integer.toHexString(error));
 		return swapped && error == EGL10.EGL_SUCCESS;
 	}
 
@@ -800,14 +786,6 @@ public abstract class ScummVM implements SurfaceHolder.Callback,
 		MirrorSurfaceProtocol.sendStatus(recipient, MirrorSurfaceProtocol.STATUS_FAILED,
 			generation, diagnostic);
 		return primaryRestored;
-	}
-
-	private String currentEglSurfaces() {
-		if (_egl == null)
-			return "egl=null";
-		return "draw=" + _egl.eglGetCurrentSurface(EGL10.EGL_DRAW) +
-			" read=" + _egl.eglGetCurrentSurface(EGL10.EGL_READ) +
-			" context=" + _egl.eglGetCurrentContext();
 	}
 
 	/** @noinspection unused
@@ -873,12 +851,11 @@ public abstract class ScummVM implements SurfaceHolder.Callback,
 		if (_egl != null && _egl_display != EGL10.EGL_NO_DISPLAY &&
 			_egl_mirror_surface != EGL10.EGL_NO_SURFACE) {
 			EGLSurface destroyedSurface = _egl_mirror_surface;
-			String currentBeforeDestroy = currentEglSurfaces();
 			boolean destroyed = _egl.eglDestroySurface(_egl_display, destroyedSurface);
 			int error = _egl.eglGetError();
-			Log.i("AdventurePadMirror", "eglDestroySurface mirror=" + destroyedSurface +
-				" result=" + destroyed + " eglError=0x" + Integer.toHexString(error) +
-				" currentBefore=" + currentBeforeDestroy + " currentAfter=" + currentEglSurfaces());
+			if (!destroyed || error != EGL10.EGL_SUCCESS)
+				Log.e(LOG_TAG, "Could not destroy the AdventurePad mirror surface: 0x" +
+					Integer.toHexString(error));
 		}
 		_egl_mirror_surface = EGL10.EGL_NO_SURFACE;
 		_mirror_surface_generation = 0;

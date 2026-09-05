@@ -368,6 +368,14 @@ int LauncherDialog::run() {
 	return getResult();
 }
 
+void LauncherDialog::runAddGame() {
+	// Keep the normal launcher as the owner of ScummVM's existing browser,
+	// detection, candidate selection and target configuration workflow.
+	open();
+	addGame();
+	close();
+}
+
 void LauncherDialog::open() {
 	// Clear the active domain, in case we return to the dialog from a
 	// failure to launch a game. Otherwise, pressing ESC will attempt to
@@ -466,6 +474,30 @@ Common::String LauncherDialog::getGameConfig(int item, Common::String key) {
 	return "";
 }
 
+bool removeGameConfigurations(const Common::StringArray &domainsToRemove) {
+	bool removed = false;
+	for (const Common::String &domain : domainsToRemove) {
+		if (!ConfMan.hasGameDomain(domain))
+			continue;
+
+		ConfMan.removeGameDomain(domain);
+		removed = true;
+
+		// Preserve the native launcher's existing behavior for configured add-ons.
+		Common::StringArray addonDomains;
+		for (const auto &addonDomain : ConfMan.getGameDomains()) {
+			if (addonDomain._value.getValOrDefault("parent") == domain)
+				addonDomains.push_back(addonDomain._key);
+		}
+		for (const Common::String &addonDomain : addonDomains)
+			ConfMan.removeGameDomain(addonDomain);
+	}
+
+	if (removed)
+		ConfMan.flushToDisk();
+	return removed;
+}
+
 void LauncherDialog::removeGame(int item) {
 	MessageDialog alert(_("Do you really want to remove this game configuration?"), _("Yes"), _("No"));
 
@@ -479,20 +511,10 @@ void LauncherDialog::removeGame(int item) {
 			selPos = getItemPos(item);
 		}
 
-		// Remove the currently selected game from the list
 		assert(item >= 0);
-		ConfMan.removeGameDomain(_domains[item]);
-
-		// Remove all the add-ons for this game
-		const Common::ConfigManager::DomainMap &domains = ConfMan.getGameDomains();
-		for (const auto &domain : domains) {
-			if (domain._value.getValOrDefault("parent") == _domains[item]) {
-				ConfMan.removeGameDomain(domain._key);
-			}
-		}
-
-		// Write config to disk
-		ConfMan.flushToDisk();
+		Common::StringArray domainsToRemove;
+		domainsToRemove.push_back(_domains[item]);
+		removeGameConfigurations(domainsToRemove);
 
 		// Update the ListWidget/GridWidget and force a redraw
 		updateListing(selPos);
@@ -501,20 +523,7 @@ void LauncherDialog::removeGame(int item) {
 }
 
 void LauncherDialog::removeGamesWithAddons(const Common::StringArray &domainsToRemove) {
-	for (const Common::String &domain : domainsToRemove) {
-		ConfMan.removeGameDomain(domain);
-
-		// Remove all the add-ons for this game
-		const Common::ConfigManager::DomainMap &domains = ConfMan.getGameDomains();
-		for (const auto &addonDomain : domains) {
-			if (addonDomain._value.getValOrDefault("parent") == domain) {
-				ConfMan.removeGameDomain(addonDomain._key);
-			}
-		}
-	}
-
-	// Write config to disk
-	ConfMan.flushToDisk();
+	removeGameConfigurations(domainsToRemove);
 }
 
 void LauncherDialog::editGame(int item) {
@@ -1144,6 +1153,11 @@ int LauncherChooser::runModal() {
 		}
 	} while (ret < -1);
 	return ret;
+}
+
+void LauncherChooser::runAddGame() {
+	if (_impl)
+		_impl->runAddGame();
 }
 
 #pragma mark -

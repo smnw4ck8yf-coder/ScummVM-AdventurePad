@@ -56,6 +56,7 @@
 #include "gui/gui-manager.h"
 #include "gui/error.h"
 #include "gui/message.h"
+#include "gui/saveload.h"
 
 #include "audio/mididrv.h"
 #include "audio/musicplugin.h"  /* for music manager */
@@ -92,6 +93,7 @@
 
 #ifdef ANDROID_BACKEND
 #include "backends/fs/android/android-fs-factory.h"
+#include "backends/platform/android/adventurepad.h"
 #endif
 
 #ifdef PLAYSTATION3
@@ -100,12 +102,143 @@
 
 #include "gui/dump-all-dialogs.h"
 
+#ifdef ANDROID_BACKEND
+static void publishAdventurePadSaveCapabilities() {
+	Android::beginAdventurePadSaveCapabilities();
+	const Common::String oldDomain = ConfMan.getActiveDomainName();
+	Common::StringArray targets;
+	for (const auto &domain : ConfMan.getGameDomains())
+		targets.push_back(domain._key);
+	for (const Common::String &target : targets) {
+		Common::String saveTarget = target;
+		saveTarget.toLowercase();
+		int latestSlot = -1;
+		bool loadAvailable = false;
+		Common::String unavailableReason = "No valid saves were found.";
+
+		EngineMan.upgradeTargetIfNecessary(saveTarget);
+		const QualifiedGameDescriptor game = EngineMan.findTarget(saveTarget);
+		const Plugin *enginePlugin = PluginMan.findEnginePlugin(game.engineId);
+		if (!enginePlugin) {
+			unavailableReason = "ScummVM could not load this game's engine.";
+		} else {
+			const MetaEngine &metaEngine = enginePlugin->get<MetaEngine>();
+			loadAvailable = metaEngine.hasFeature(MetaEngine::kSupportsListSaves) &&
+				metaEngine.hasFeature(MetaEngine::kSupportsLoadingDuringStartup);
+			if (!loadAvailable) {
+				unavailableReason = "This engine does not support loading from the launcher.";
+			} else {
+				ConfMan.setActiveDomain(target);
+				SaveStateList saves = metaEngine.listSaves(saveTarget.c_str());
+				for (int i = (int)saves.size() - 1; i >= 0; --i) {
+					if (!saves[i].isValid() || saves[i].getSaveSlot() < 0)
+						saves.remove_at(i);
+				}
+
+				if (saves.size() == 1) {
+					if (metaEngine.hasFeature(MetaEngine::kSavesSupportMetaInfo) &&
+							!metaEngine.querySaveMetaInfos(saveTarget.c_str(), saves[0].getSaveSlot()).isValid()) {
+						unavailableReason = "Save metadata is missing or corrupt.";
+					} else {
+						latestSlot = saves[0].getSaveSlot();
+						unavailableReason.clear();
+					}
+				} else if (saves.size() > 1 &&
+						metaEngine.hasFeature(MetaEngine::kSavesSupportMetaInfo) &&
+						metaEngine.hasFeature(MetaEngine::kSavesSupportCreationDate)) {
+					Common::String newestTimestamp;
+					bool metadataValid = true;
+					bool newestTied = false;
+					for (const SaveStateDescriptor &save : saves) {
+						const SaveStateDescriptor metadata =
+							metaEngine.querySaveMetaInfos(saveTarget.c_str(), save.getSaveSlot());
+						if (!metadata.isValid() || metadata.getSaveDate().empty() ||
+								metadata.getSaveTime().empty()) {
+							metadataValid = false;
+							break;
+						}
+						const Common::String timestamp = metadata.getSaveDate() + " " + metadata.getSaveTime();
+						if (latestSlot < 0 || timestamp > newestTimestamp) {
+							newestTimestamp = timestamp;
+							latestSlot = save.getSaveSlot();
+							newestTied = false;
+						} else if (timestamp == newestTimestamp) {
+							newestTied = true;
+						}
+					}
+					if (!metadataValid) {
+						latestSlot = -1;
+						unavailableReason = "Save metadata is missing or corrupt.";
+					} else if (newestTied) {
+						latestSlot = -1;
+						unavailableReason = "The newest save cannot be identified unambiguously.";
+					} else {
+						unavailableReason.clear();
+					}
+				} else if (saves.size() > 1) {
+					unavailableReason = "This engine does not expose save creation times.";
+				}
+			}
+		}
+		Android::reportAdventurePadSaveCapability(target, latestSlot, loadAvailable,
+			unavailableReason);
+	}
+	ConfMan.setActiveDomain(oldDomain);
+	Android::finishAdventurePadSaveCapabilities();
+}
+
+static bool openAdventurePadLauncherLoadGame(const Common::String &target) {
+	if (!ConfMan.hasGameDomain(target)) {
+		GUI::MessageDialog(_("The selected ScummVM target no longer exists.")).runModal();
+		return false;
+	}
+	Common::String saveTarget = target;
+	saveTarget.toLowercase();
+	EngineMan.upgradeTargetIfNecessary(saveTarget);
+	const QualifiedGameDescriptor game = EngineMan.findTarget(saveTarget);
+	const Plugin *enginePlugin = PluginMan.findEnginePlugin(game.engineId);
+	if (!enginePlugin) {
+		GUI::MessageDialog(_("ScummVM could not find an engine for the selected game.")).runModal();
+		return false;
+	}
+	const MetaEngine &metaEngine = enginePlugin->get<MetaEngine>();
+	if (!metaEngine.hasFeature(MetaEngine::kSupportsListSaves) ||
+			!metaEngine.hasFeature(MetaEngine::kSupportsLoadingDuringStartup)) {
+		GUI::MessageDialog(_("This game does not support loading games from the launcher.")).runModal();
+		return false;
+	}
+
+	GUI::SaveLoadChooser chooser(false);
+	const int slot = chooser.runModalWithMetaEngineAndTarget(&metaEngine, saveTarget);
+	if (slot < 0)
+		return false;
+	ConfMan.setActiveDomain(target);
+	ConfMan.setInt("save_slot", slot, Common::ConfigManager::kTransientDomain);
+	return true;
+}
+#endif
+
 static bool launcherDialog() {
 
 	// Discard any command line options. Those that affect the graphics
 	// mode and the others (like bootparam etc.) should not
 	// blindly be passed to the first game launched from the launcher.
 	ConfMan.getDomain(Common::ConfigManager::kTransientDomain)->clear();
+
+#ifdef ANDROID_BACKEND
+	if (Android::isAdventurePadAddGameLaunch()) {
+		GUI::LauncherChooser dlg;
+		dlg.selectLauncher();
+		dlg.runAddGame();
+		publishAdventurePadSaveCapabilities();
+		Android::returnToAdventurePad();
+		return false;
+	}
+#endif
+
+#ifdef ANDROID_BACKEND
+	publishAdventurePadSaveCapabilities();
+#endif
 
 	// If the backend does not allow quitting, loop on the launcher until a game is started
 	bool noQuit = g_system->hasFeature(OSystem::kFeatureNoQuit);
@@ -574,6 +707,43 @@ extern "C" int scummvm_main(int argc, const char * const argv[]) {
 	// the command line params) was read.
 	system.initBackend();
 
+#ifdef ANDROID_BACKEND
+	// Bridge-only configuration work exits before graphics setup or launcher UI.
+	const Common::String adventurePadRemoveTarget = Android::getAdventurePadRemoveTarget();
+	if (Android::isAdventurePadSaveCapabilityRefreshLaunch() || !adventurePadRemoveTarget.empty()) {
+		if (!adventurePadRemoveTarget.empty()) {
+			Common::StringArray targetsToRemove;
+			targetsToRemove.push_back(adventurePadRemoveTarget);
+			const bool removed = GUI::removeGameConfigurations(targetsToRemove);
+			Android::finishAdventurePadGameRemoval(adventurePadRemoveTarget, removed,
+				removed ? Common::String() : Common::String("The configured target no longer exists."));
+		} else {
+			publishAdventurePadSaveCapabilities();
+		}
+		PluginManager::destroy();
+		GUI::GuiManager::destroy();
+		Common::ConfigManager::destroy();
+		Common::DebugManager::destroy();
+		Common::OSDMessageQueue::destroy();
+#ifdef ENABLE_EVENTRECORDER
+		GUI::EventRecorder::destroy();
+#endif
+		Common::SearchManager::destroy();
+#ifdef USE_TRANSLATION
+		Common::MainTranslationManager::destroy();
+#endif
+		MusicManager::destroy();
+		Graphics::CursorManager::destroy();
+		Graphics::FontManager::destroy();
+#ifdef USE_FREETYPE2
+		Graphics::shutdownTTF();
+#endif
+		EngineManager::destroy();
+		Graphics::YUVToRGBManager::destroy();
+		return Common::kNoError;
+	}
+#endif
+
 	// If we received an invalid graphics mode parameter via command line
 	// we check this here. We can't do it until after the backend is inited,
 	// or there won't be a graphics manager to ask for the supported modes.
@@ -752,8 +922,15 @@ extern "C" int scummvm_main(int argc, const char * const argv[]) {
 	}
 
 	// Unless a game was specified, show the launcher dialog
-	if (nullptr == ConfMan.getActiveDomain() && !ConfMan.hasKey("dump_all_dialogs"))
+	if (nullptr == ConfMan.getActiveDomain() && !ConfMan.hasKey("dump_all_dialogs")) {
+#ifdef ANDROID_BACKEND
+		const Common::String adventurePadLoadTarget = Android::getAdventurePadLoadTarget();
+		if (adventurePadLoadTarget.empty() || !openAdventurePadLauncherLoadGame(adventurePadLoadTarget))
+			launcherDialog();
+#else
 		launcherDialog();
+#endif
+	}
 
 	// FIXME: We're now looping the launcher. This, of course, doesn't
 	// work as well as it should. In theory everything should be destroyed
@@ -838,6 +1015,10 @@ extern "C" int scummvm_main(int argc, const char * const argv[]) {
 
 			// Try to run the game
 			result = runGame(enginePlugin, system, game, meDescriptor);
+#ifdef ANDROID_BACKEND
+			// The engine instance is gone and its newly written/deleted saves are stable.
+			publishAdventurePadSaveCapabilities();
+#endif
 			if (ttsMan != nullptr) {
 				ttsMan->popState();
 			}

@@ -110,6 +110,14 @@ jmethodID JNI::_MID_getScummVMLogPath;
 jmethodID JNI::_MID_setCurrentGame = 0;
 jmethodID JNI::_MID_setAdventurePadGameViewport = 0;
 jmethodID JNI::_MID_isAdventurePadAdvancedLaunch = 0;
+jmethodID JNI::_MID_isAdventurePadAddGameLaunch = 0;
+jmethodID JNI::_MID_isAdventurePadSaveCapabilityRefreshLaunch = 0;
+jmethodID JNI::_MID_getAdventurePadLoadTarget = 0;
+jmethodID JNI::_MID_getAdventurePadRemoveTarget = 0;
+jmethodID JNI::_MID_beginAdventurePadSaveCapabilities = 0;
+jmethodID JNI::_MID_reportAdventurePadSaveCapability = 0;
+jmethodID JNI::_MID_finishAdventurePadSaveCapabilities = 0;
+jmethodID JNI::_MID_finishAdventurePadGameRemoval = 0;
 jmethodID JNI::_MID_returnToAdventurePad = 0;
 jmethodID JNI::_MID_notifyHTTPService = 0;
 jmethodID JNI::_MID_getSysArchives = 0;
@@ -633,6 +641,124 @@ bool JNI::isAdventurePadAdvancedLaunch() {
 	return advancedLaunch == JNI_TRUE;
 }
 
+bool JNI::isAdventurePadAddGameLaunch() {
+	JNIEnv *env = JNI::getEnv();
+	jboolean addGameLaunch = env->CallBooleanMethod(_jobj, _MID_isAdventurePadAddGameLaunch);
+
+	if (env->ExceptionCheck()) {
+		LOGE("Failed to query AdventurePad Add Game launch state");
+		env->ExceptionDescribe();
+		env->ExceptionClear();
+		return false;
+	}
+
+	return addGameLaunch == JNI_TRUE;
+}
+
+bool JNI::isAdventurePadSaveCapabilityRefreshLaunch() {
+	JNIEnv *env = JNI::getEnv();
+	jboolean refreshLaunch = env->CallBooleanMethod(
+		_jobj, _MID_isAdventurePadSaveCapabilityRefreshLaunch);
+	if (env->ExceptionCheck()) {
+		LOGE("Failed to query AdventurePad save-capability refresh launch state");
+		env->ExceptionDescribe();
+		env->ExceptionClear();
+		return false;
+	}
+
+	return refreshLaunch == JNI_TRUE;
+}
+
+Common::String JNI::getAdventurePadLoadTarget() {
+	JNIEnv *env = JNI::getEnv();
+	jstring javaTarget = (jstring)env->CallObjectMethod(_jobj, _MID_getAdventurePadLoadTarget);
+	if (env->ExceptionCheck()) {
+		LOGE("Failed to query AdventurePad load target");
+		env->ExceptionDescribe();
+		env->ExceptionClear();
+		return Common::String();
+	}
+	Common::String target;
+	if (javaTarget) {
+		const char *chars = env->GetStringUTFChars(javaTarget, nullptr);
+		if (chars) {
+			target = chars;
+			env->ReleaseStringUTFChars(javaTarget, chars);
+		}
+		env->DeleteLocalRef(javaTarget);
+	}
+	return target;
+}
+
+Common::String JNI::getAdventurePadRemoveTarget() {
+	JNIEnv *env = JNI::getEnv();
+	jstring javaTarget = (jstring)env->CallObjectMethod(_jobj, _MID_getAdventurePadRemoveTarget);
+	if (env->ExceptionCheck()) {
+		LOGE("Failed to query AdventurePad removal target");
+		env->ExceptionDescribe();
+		env->ExceptionClear();
+		return Common::String();
+	}
+	Common::String target;
+	if (javaTarget) {
+		const char *chars = env->GetStringUTFChars(javaTarget, nullptr);
+		if (chars) {
+			target = chars;
+			env->ReleaseStringUTFChars(javaTarget, chars);
+		}
+		env->DeleteLocalRef(javaTarget);
+	}
+	return target;
+}
+
+void JNI::beginAdventurePadSaveCapabilities() {
+	JNIEnv *env = JNI::getEnv();
+	env->CallVoidMethod(_jobj, _MID_beginAdventurePadSaveCapabilities);
+	if (env->ExceptionCheck()) {
+		env->ExceptionDescribe();
+		env->ExceptionClear();
+	}
+}
+
+void JNI::reportAdventurePadSaveCapability(const Common::String &target, int latestSlot,
+		bool loadAvailable, const Common::String &resumeUnavailableReason) {
+	JNIEnv *env = JNI::getEnv();
+	jstring javaTarget = env->NewStringUTF(target.c_str());
+	jstring javaReason = env->NewStringUTF(resumeUnavailableReason.c_str());
+	env->CallVoidMethod(_jobj, _MID_reportAdventurePadSaveCapability, javaTarget, latestSlot,
+		loadAvailable ? JNI_TRUE : JNI_FALSE, javaReason);
+	if (env->ExceptionCheck()) {
+		env->ExceptionDescribe();
+		env->ExceptionClear();
+	}
+	env->DeleteLocalRef(javaTarget);
+	env->DeleteLocalRef(javaReason);
+}
+
+void JNI::finishAdventurePadSaveCapabilities() {
+	JNIEnv *env = JNI::getEnv();
+	env->CallVoidMethod(_jobj, _MID_finishAdventurePadSaveCapabilities);
+	if (env->ExceptionCheck()) {
+		env->ExceptionDescribe();
+		env->ExceptionClear();
+	}
+}
+
+void JNI::finishAdventurePadGameRemoval(const Common::String &target, bool removed,
+		const Common::String &error) {
+	JNIEnv *env = JNI::getEnv();
+	jstring javaTarget = env->NewStringUTF(target.c_str());
+	jstring javaError = env->NewStringUTF(error.c_str());
+	env->CallVoidMethod(_jobj, _MID_finishAdventurePadGameRemoval, javaTarget,
+		removed ? JNI_TRUE : JNI_FALSE, javaError);
+	if (env->ExceptionCheck()) {
+		env->ExceptionDescribe();
+		env->ExceptionClear();
+	}
+	env->DeleteLocalRef(javaTarget);
+	env->DeleteLocalRef(javaError);
+}
+
 void JNI::returnToAdventurePad() {
 	JNIEnv *env = JNI::getEnv();
 	env->CallVoidMethod(_jobj, _MID_returnToAdventurePad);
@@ -648,6 +774,40 @@ namespace Android {
 
 bool isAdventurePadAdvancedLaunch() {
 	return JNI::isAdventurePadAdvancedLaunch();
+}
+
+bool isAdventurePadAddGameLaunch() {
+	return JNI::isAdventurePadAddGameLaunch();
+}
+
+bool isAdventurePadSaveCapabilityRefreshLaunch() {
+	return JNI::isAdventurePadSaveCapabilityRefreshLaunch();
+}
+
+Common::String getAdventurePadLoadTarget() {
+	return JNI::getAdventurePadLoadTarget();
+}
+
+Common::String getAdventurePadRemoveTarget() {
+	return JNI::getAdventurePadRemoveTarget();
+}
+
+void beginAdventurePadSaveCapabilities() {
+	JNI::beginAdventurePadSaveCapabilities();
+}
+
+void reportAdventurePadSaveCapability(const Common::String &target, int latestSlot,
+		bool loadAvailable, const Common::String &resumeUnavailableReason) {
+	JNI::reportAdventurePadSaveCapability(target, latestSlot, loadAvailable, resumeUnavailableReason);
+}
+
+void finishAdventurePadSaveCapabilities() {
+	JNI::finishAdventurePadSaveCapabilities();
+}
+
+void finishAdventurePadGameRemoval(const Common::String &target, bool removed,
+		const Common::String &error) {
+	JNI::finishAdventurePadGameRemoval(target, removed, error);
 }
 
 void returnToAdventurePad() {
@@ -1041,6 +1201,14 @@ void JNI::create(JNIEnv *env, jobject self, jobject asset_manager,
 	FIND_METHOD(, setCurrentGame, "(Ljava/lang/String;)V");
 	FIND_METHOD(, setAdventurePadGameViewport, "(IIIIII)V");
 	FIND_METHOD(, isAdventurePadAdvancedLaunch, "()Z");
+	FIND_METHOD(, isAdventurePadAddGameLaunch, "()Z");
+	FIND_METHOD(, isAdventurePadSaveCapabilityRefreshLaunch, "()Z");
+	FIND_METHOD(, getAdventurePadLoadTarget, "()Ljava/lang/String;");
+	FIND_METHOD(, getAdventurePadRemoveTarget, "()Ljava/lang/String;");
+	FIND_METHOD(, beginAdventurePadSaveCapabilities, "()V");
+	FIND_METHOD(, reportAdventurePadSaveCapability, "(Ljava/lang/String;IZLjava/lang/String;)V");
+	FIND_METHOD(, finishAdventurePadSaveCapabilities, "()V");
+	FIND_METHOD(, finishAdventurePadGameRemoval, "(Ljava/lang/String;ZLjava/lang/String;)V");
 	FIND_METHOD(, returnToAdventurePad, "()V");
 	FIND_METHOD(, notifyHTTPService, "(IZ)V");
 	FIND_METHOD(, getSysArchives, "()[Ljava/lang/String;");
