@@ -1,4 +1,24 @@
-/* ScummVM - Graphic Adventure Engine */
+/* ScummVM - Graphic Adventure Engine
+ *
+ * ScummVM is the legal property of its developers, whose names
+ * are too numerous to list here. Please refer to the COPYRIGHT
+ * file distributed with this source distribution.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+
 package org.scummvm.scummvm;
 
 import android.content.Context;
@@ -18,7 +38,7 @@ import java.io.InputStream;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/** Optional artwork layer clipped so it can never draw over ScummVM's live viewport. */
+/** Optional alpha artwork above normal gameplay and clipped behind Split View content. */
 public final class SkinSurroundView extends View {
 	private static final Uri CHANGES_URI = Uri.parse("content://com.jamesmoran.adventurepad.skins/gameplay");
 	private final Rect _viewport = new Rect();
@@ -89,16 +109,19 @@ public final class SkinSurroundView extends View {
 	protected void onDraw(Canvas canvas) {
 		super.onDraw(canvas);
 		Bitmap bitmap = _bitmap;
-		if ((!_splitViewActive && bitmap == null) ||
-			(_viewport.width() >= getWidth() && _viewport.height() >= getHeight())) return;
 		_destination.set(0, 0, getWidth(), getHeight());
-		int save = canvas.save();
-		canvas.clipOutRect(_viewport);
-		if (_splitViewActive)
+		if (_splitViewActive) {
+			if (_viewport.width() >= getWidth() && _viewport.height() >= getHeight()) return;
+			int save = canvas.save();
+			canvas.clipOutRect(_viewport);
 			canvas.drawColor(Color.BLACK);
-		else
+			canvas.restoreToCount(save);
+		} else if (bitmap != null) {
+			// SkinSurroundView is a transparent window layer above the default SurfaceView.
+			// Drawing the whole PNG preserves its authored alpha: transparent pixels reveal
+			// the game and non-transparent edge artwork may overlap it without changing geometry.
 			canvas.drawBitmap(bitmap, null, _destination, null);
-		canvas.restoreToCount(save);
+		}
 	}
 
 	private void loadCurrentTarget() {
