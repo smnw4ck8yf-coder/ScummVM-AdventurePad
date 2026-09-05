@@ -1,5 +1,8 @@
 # Milestone 1 – AdventurePad Dual-Screen Proof of Concept
 
+> Historical development record: the status and remaining-work list below
+> describe the 2026-08-05 proof of concept, not the current fork.
+
 **Date:** 2026-08-05
 
 ## Objective
@@ -83,4 +86,3 @@ AdventurePad dual-screen cursor integration
 ## Notes
 
 This is the first fully working end-to-end proof that the lower touchscreen on the AYN Thor can function as a native trackpad for ScummVM without an overlay cursor.
-
