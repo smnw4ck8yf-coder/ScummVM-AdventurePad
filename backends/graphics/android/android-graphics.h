@@ -79,8 +79,6 @@ private:
 	void updateMirrorSourceGeometry();
 	void updateUpperPresentation();
 	void updateSkinSurroundViewport();
-	void logMirrorRenderTransition(const char *stage);
-	void logMirrorTextureLifecycle(const char *stage);
 
 	OpenGL::Surface *_touchcontrols;
 	OpenGL::Backbuffer _mirrorTarget;
@@ -115,13 +113,7 @@ private:
 	int _reportedMirrorCursorY;
 	bool _reportedMirrorCursorVisible;
 	int64 _reportedMirrorCursorGeometryGeneration;
-	int _mirrorRenderLogCount;
-	int _mirrorRefreshEventCount;
 	bool _mirrorRefreshFramePending;
-	bool _mirrorCursorFramePending;
-	bool _awaitingFirstMirrorCursorMovement;
-	int _mirrorTextureTraceSequence;
-	int _mirrorTextureTraceLogCount;
 	int _old_touch_mode;
 	bool _rendering3d;
 };

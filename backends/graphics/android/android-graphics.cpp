@@ -61,42 +61,6 @@ int mirrorOrientation(Common::RotationMode rotation) {
 	}
 }
 
-void logMirrorGLState(const char *stage) {
-	GLint framebuffer = 0;
-	GLint viewport[4] = { 0, 0, 0, 0 };
-	GLint scissorBox[4] = { 0, 0, 0, 0 };
-	GLint program = 0;
-	GLint activeTexture = 0;
-	GLint texture = 0;
-	GLboolean scissor = GL_FALSE;
-	GLboolean blend = GL_FALSE;
-	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &framebuffer);
-	glGetIntegerv(GL_VIEWPORT, viewport);
-	glGetBooleanv(GL_SCISSOR_TEST, &scissor);
-	glGetIntegerv(GL_SCISSOR_BOX, scissorBox);
-	glGetBooleanv(GL_BLEND, &blend);
-	glGetIntegerv(GL_CURRENT_PROGRAM, &program);
-	glGetIntegerv(GL_ACTIVE_TEXTURE, &activeTexture);
-	glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture);
-	const GLenum error = glGetError();
-	LOGI("AdventurePadMirror GL %s framebuffer=%d viewport=%d,%d %dx%d scissor=%d box=%d,%d %dx%d blend=%d program=%d activeTexture=0x%x texture=%d glError=0x%x",
-			stage, framebuffer, viewport[0], viewport[1], viewport[2], viewport[3],
-			scissor, scissorBox[0], scissorBox[1], scissorBox[2], scissorBox[3],
-			blend, program, activeTexture, texture, error);
-}
-
-void logMirrorProjectionState(const char *stage, const OpenGL::Framebuffer &target,
-		int width, int height, bool activatedAfterSurfaceSwitch) {
-	const float *projection = target.getProjectionMatrix().getData();
-	LOGI("AdventurePadMirror target %s size=%dx%d projection=[%.7f %.7f %.7f %.7f | %.7f %.7f %.7f %.7f | %.7f %.7f %.7f %.7f | %.7f %.7f %.7f %.7f] model=none projectionUniformAppliedOnActivate=%d",
-			stage, width, height,
-			projection[0], projection[1], projection[2], projection[3],
-			projection[4], projection[5], projection[6], projection[7],
-			projection[8], projection[9], projection[10], projection[11],
-			projection[12], projection[13], projection[14], projection[15],
-			activatedAfterSurfaceSwitch);
-}
-
 } // End of anonymous namespace
 
 //
@@ -136,13 +100,7 @@ AndroidGraphicsManager::AndroidGraphicsManager() :
 	_reportedMirrorCursorY(-1),
 	_reportedMirrorCursorVisible(false),
 	_reportedMirrorCursorGeometryGeneration(0),
-	_mirrorRenderLogCount(0),
-	_mirrorRefreshEventCount(0),
 	_mirrorRefreshFramePending(false),
-	_mirrorCursorFramePending(false),
-	_awaitingFirstMirrorCursorMovement(false),
-	_mirrorTextureTraceSequence(0),
-	_mirrorTextureTraceLogCount(0),
 	_old_touch_mode(OSystem_Android::TOUCH_MODE_TOUCHPAD) {
 	ENTER();
 
@@ -243,14 +201,6 @@ void AndroidGraphicsManager::updateScreen() {
 	if (!JNI::haveSurface())
 		return;
 
-	const bool traceScheduledFrame = _mirrorRefreshFramePending || _mirrorCursorFramePending;
-	if (traceScheduledFrame) {
-		logMirrorRenderTransition("updateScreen entered");
-		logMirrorTextureLifecycle(_mirrorCursorFramePending ?
-				"sequence-B update entered after first movement" :
-				"sequence-A update entered after mirror activation");
-	}
-
 	// Attach and detach requests arrive on Android's main thread, but EGL
 	// lifecycle work is consumed here on ScummVM's render thread.
 	JNI::updateMirrorSurface();
@@ -260,14 +210,8 @@ void AndroidGraphicsManager::updateScreen() {
 	// Sets _forceRedraw if needed
 	dynamic_cast<OSystem_Android *>(g_system)->getTouchControls().beforeDraw();
 
-	if (traceScheduledFrame)
-		logMirrorTextureLifecycle("before primary updateScreen");
 	OpenGLGraphicsManager::updateScreen();
 	updateSkinSurroundViewport();
-	if (traceScheduledFrame) {
-		logMirrorRenderTransition("primary frame returned");
-		logMirrorTextureLifecycle("after primary updateScreen");
-	}
 	if (_pendingModeAckGeneration > 0) {
 		const char *diagnostic = _pendingModeAckResult == 1 ? "Full-frame upper presentation applied" :
 			_pendingModeAckResult == 2 ? "Expanded upper presentation applied" :
@@ -280,13 +224,7 @@ void AndroidGraphicsManager::updateScreen() {
 		_pendingModeAckResult = 0;
 	}
 	renderMirrorSurface();
-	if (traceScheduledFrame) {
-		logMirrorTextureLifecycle("after mirror render");
-		logMirrorRenderTransition(_mirrorSourceState == 1 ?
-				"mirror frame presented" : "mirror frame did not reach supported state");
-		_mirrorRefreshFramePending = false;
-		_mirrorCursorFramePending = false;
-	}
+	_mirrorRefreshFramePending = false;
 }
 
 void AndroidGraphicsManager::updateSkinSurroundViewport() {
@@ -308,97 +246,9 @@ void AndroidGraphicsManager::updateSkinSurroundViewport() {
 }
 
 void AndroidGraphicsManager::handleMirrorLifecycleChange() {
-	++_mirrorRefreshEventCount;
-	++_mirrorTextureTraceSequence;
 	_mirrorRefreshFramePending = true;
-	_awaitingFirstMirrorCursorMovement = true;
-	logMirrorRenderTransition("JE_MIRROR_REFRESH consumed; forcing one frame");
-	logMirrorTextureLifecycle("sequence-A mirror lifecycle event");
 	_forceRedraw = true;
 	updateScreen();
-}
-
-void AndroidGraphicsManager::logMirrorRenderTransition(const char *stage) {
-	if (_mirrorRenderLogCount >= 64)
-		return;
-	++_mirrorRenderLogCount;
-	const int gameDirty = _gameScreen ? (_gameScreen->isDirty() ? 1 : 0) : -1;
-	LOGI("AdventurePadMirrorRender event=%d/64 stage=%s refreshEvents=%d refreshPending=%d cursorPending=%d havePrimary=%d haveMirror=%d forceRedraw=%d cursorNeedsRedraw=%d gameDirty=%d mirrorGeneration=%lld mirrorState=%d",
-			_mirrorRenderLogCount, stage, _mirrorRefreshEventCount,
-			_mirrorRefreshFramePending, _mirrorCursorFramePending,
-			JNI::haveSurface(), JNI::haveMirrorSurface(), _forceRedraw,
-			_cursorNeedsRedraw, gameDirty, (long long)_mirrorGeneration, _mirrorSourceState);
-}
-
-void AndroidGraphicsManager::logMirrorTextureLifecycle(const char *stage) {
-	if (_mirrorTextureTraceLogCount >= 96)
-		return;
-	++_mirrorTextureTraceLogCount;
-
-	const OpenGL::Surface *sourceSurface = _gameScreen;
-	const OpenGL::Texture *sourceTexture = sourceSurface ? &sourceSurface->getGLTexture() : nullptr;
-#if defined(USE_OPENGL_GAME) || defined(USE_OPENGL_SHADERS)
-	const char *sourceKind = sourceSurface ? "gameScreen" :
-		(_renderer3d && _renderer3d->hasTexture() ? "renderer3d" : "none");
-	if (!sourceTexture && _renderer3d && _renderer3d->hasTexture())
-		sourceTexture = &_renderer3d->getGLTexture();
-#else
-	const char *sourceKind = sourceSurface ? "gameScreen" : "none";
-#endif
-	const OpenGL::Texture *cursorTexture = _cursor ? &_cursor->getGLTexture() : nullptr;
-	const Common::Rect dirtyArea = sourceSurface ?
-		sourceSurface->getDirtyAreaForDiagnostics() : Common::Rect();
-	const Common::Rect sourceUpload = sourceTexture ?
-		sourceTexture->getLastUploadArea() : Common::Rect();
-	const Common::Rect cursorUpload = cursorTexture ?
-		cursorTexture->getLastUploadArea() : Common::Rect();
-	GLint framebuffer = 0;
-	GLint activeTexture = 0;
-	GLint boundTexture = 0;
-	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &framebuffer);
-	glGetIntegerv(GL_ACTIVE_TEXTURE, &activeTexture);
-	glGetIntegerv(GL_TEXTURE_BINDING_2D, &boundTexture);
-
-	LOGI("AdventurePadTextureLifecycle event=%d/96 sequence=%d stage=%s source=%s surface=%p texture=%p id=%u logical=%ux%u allocated=%ux%u dirty=%d dirtyArea=%d,%d-%d,%d mutationGen=%u cleanGen=%u paletteGen=%u palettePending=%d gpuGenerated=%d sourceReady=%d inputTexSubImageGen=%u paletteTexSubImageGen=%u framebufferGen=%u framebufferOK=%d framebufferStorageGen=%u nameGen=%u storageGen=%u storageOK=%d texSubImageGen=%u uploadOK=%d uploadedStorageGen=%u lastUpload=%d,%d-%d,%d framebuffer=%d activeTexture=0x%x boundTexture=%d forceRedraw=%d cursorNeedsRedraw=%d cursorId=%u cursorDirty=%d cursorMutationGen=%u cursorCleanGen=%u cursorNameGen=%u cursorStorageGen=%u cursorStorageOK=%d cursorTexSubImageGen=%u cursorUploadOK=%d cursorUploadedStorageGen=%u cursorLastUpload=%d,%d-%d,%d",
-			_mirrorTextureTraceLogCount, _mirrorTextureTraceSequence, stage, sourceKind,
-			(const void *)sourceSurface, (const void *)sourceTexture,
-			sourceTexture ? sourceTexture->getGLTexture() : 0,
-			sourceTexture ? sourceTexture->getLogicalWidth() : 0,
-			sourceTexture ? sourceTexture->getLogicalHeight() : 0,
-			sourceTexture ? sourceTexture->getWidth() : 0,
-			sourceTexture ? sourceTexture->getHeight() : 0,
-			sourceSurface ? sourceSurface->isDirty() : 0,
-			dirtyArea.left, dirtyArea.top, dirtyArea.right, dirtyArea.bottom,
-			sourceSurface ? sourceSurface->getMutationGeneration() : 0,
-			sourceSurface ? sourceSurface->getCleanGeneration() : 0,
-			sourceSurface ? sourceSurface->getPaletteGeneration() : 0,
-			sourceSurface ? sourceSurface->isPaletteUploadPending() : 0,
-			sourceSurface ? sourceSurface->isGPUGeneratedSource() : 0,
-			sourceSurface ? sourceSurface->isSourceDataReady() : 0,
-			sourceSurface ? sourceSurface->getInputUploadGeneration() : 0,
-			sourceSurface ? sourceSurface->getPaletteUploadGeneration() : 0,
-			sourceSurface ? sourceSurface->getFramebufferGeneration() : 0,
-			sourceSurface ? sourceSurface->wasLastFramebufferGenerationSuccessful() : 0,
-			sourceSurface ? sourceSurface->getFramebufferStorageGeneration() : 0,
-			sourceTexture ? sourceTexture->getNameGeneration() : 0,
-			sourceTexture ? sourceTexture->getStorageGeneration() : 0,
-			sourceTexture ? sourceTexture->wasLastStorageSuccessful() : 0,
-			sourceTexture ? sourceTexture->getUploadGeneration() : 0,
-			sourceTexture ? sourceTexture->wasLastUploadSuccessful() : 0,
-			sourceTexture ? sourceTexture->getUploadedStorageGeneration() : 0,
-			sourceUpload.left, sourceUpload.top, sourceUpload.right, sourceUpload.bottom,
-			framebuffer, activeTexture, boundTexture, _forceRedraw, _cursorNeedsRedraw,
-			cursorTexture ? cursorTexture->getGLTexture() : 0,
-			_cursor ? _cursor->isDirty() : 0,
-			_cursor ? _cursor->getMutationGeneration() : 0,
-			_cursor ? _cursor->getCleanGeneration() : 0,
-			cursorTexture ? cursorTexture->getNameGeneration() : 0,
-			cursorTexture ? cursorTexture->getStorageGeneration() : 0,
-			cursorTexture ? cursorTexture->wasLastStorageSuccessful() : 0,
-			cursorTexture ? cursorTexture->getUploadGeneration() : 0,
-			cursorTexture ? cursorTexture->wasLastUploadSuccessful() : 0,
-			cursorTexture ? cursorTexture->getUploadedStorageGeneration() : 0,
-			cursorUpload.left, cursorUpload.top, cursorUpload.right, cursorUpload.bottom);
 }
 
 void AndroidGraphicsManager::updateMirrorSourceGeometry() {
@@ -552,9 +402,6 @@ void AndroidGraphicsManager::renderMirrorSurface() {
 		_mirrorSourceState = -1;
 		return;
 	}
-	if (_mirrorRefreshFramePending || _mirrorCursorFramePending)
-		logMirrorRenderTransition("mirror draw entered");
-
 	const int64 generation = JNI::mirrorSurfaceGeneration();
 	if (_mirrorGeneration != generation) {
 		_mirrorGeneration = generation;
@@ -572,9 +419,6 @@ void AndroidGraphicsManager::renderMirrorSurface() {
 		sourceTexture = &_renderer3d->getGLTexture();
 	}
 #endif
-	if (_mirrorRefreshFramePending || _mirrorCursorFramePending)
-		logMirrorTextureLifecycle("mirror source selected");
-
 	if (!sourceTexture || sourceTexture->getLogicalWidth() == 0 || sourceTexture->getLogicalHeight() < 4) {
 		if (_mirrorSourceWidth != 0 || _mirrorSourceHeight != 0) {
 			_mirrorSourceWidth = 0;
@@ -637,25 +481,9 @@ void AndroidGraphicsManager::renderMirrorSurface() {
 		}
 	}
 	if (_mirrorDiagnosticFramesRemaining > 0) {
-		const char *sourceType = _gameScreen ? "gameScreen" : "renderer3d";
 		const bool textureValid = glIsTexture(sourceTexture->getGLTexture()) == GL_TRUE;
 		const bool uploadPending = _gameScreen && _gameScreen->isDirty();
-		const bool sourceDataReady = _gameScreen ? _gameScreen->isSourceDataReady() :
-			(sourceTexture->wasLastUploadSuccessful() &&
-			 sourceTexture->getUploadedStorageGeneration() == sourceTexture->getStorageGeneration());
 		const GLenum textureError = glGetError();
-		LOGI("AdventurePadMirror source=%s logical=%ux%u allocated=%ux%u id=%u valid=%d dirty=%d sourceDataReady=%d gpuGenerated=%d palettePending=%d framebufferGen=%u framebufferStorageGen=%u storageGen=%u uploadedStorageGen=%u linearFilter=%d glError=0x%x",
-				sourceType, sourceTexture->getLogicalWidth(), sourceTexture->getLogicalHeight(),
-				sourceTexture->getWidth(), sourceTexture->getHeight(), sourceTexture->getGLTexture(),
-				textureValid, _gameScreen ? _gameScreen->isDirty() : 0,
-				sourceDataReady, _gameScreen ? _gameScreen->isGPUGeneratedSource() : 0,
-				_gameScreen ? _gameScreen->isPaletteUploadPending() : 0,
-				_gameScreen ? _gameScreen->getFramebufferGeneration() : 0,
-				_gameScreen ? _gameScreen->getFramebufferStorageGeneration() : 0,
-				sourceTexture->getStorageGeneration(),
-				sourceTexture->getUploadedStorageGeneration(),
-				sourceTexture->isLinearFilteringEnabled(), textureError);
-		logMirrorGLState("primary-before-switch");
 		if (!textureValid || uploadPending || textureError != GL_NO_ERROR) {
 			JNI::failMirrorSurface("Reusable source texture is not valid in the primary context");
 			return;
@@ -684,14 +512,8 @@ void AndroidGraphicsManager::renderMirrorSurface() {
 		JNI::failMirrorSurface("OpenGL pipeline is unavailable");
 		return;
 	}
-	GLint primaryViewport[4] = { 0, 0, 0, 0 };
-	if (_mirrorDiagnosticFramesRemaining > 0)
-		glGetIntegerv(GL_VIEWPORT, primaryViewport);
 	OpenGL::Pipeline::disable();
 	OpenGL::Framebuffer *primaryTarget = pipeline->setFramebuffer(&_mirrorTarget);
-	if (_mirrorDiagnosticFramesRemaining > 0)
-		logMirrorProjectionState("primary-before-switch", *primaryTarget,
-				primaryViewport[2], primaryViewport[3], false);
 	_mirrorTarget.setSize(surfaceWidth, surfaceHeight);
 
 	if (!JNI::makeMirrorSurfaceCurrent()) {
@@ -707,14 +529,10 @@ void AndroidGraphicsManager::renderMirrorSurface() {
 	}
 
 	pipeline->activate();
-	if (_mirrorDiagnosticFramesRemaining > 0)
-		logMirrorProjectionState("mirror-active", _mirrorTarget, surfaceWidth, surfaceHeight, true);
 	_mirrorTarget.setClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 	_mirrorTarget.enableScissorTest(false);
 	_mirrorTarget.enableBlend(OpenGL::Framebuffer::kBlendModeOpaque);
 	pipeline->setColor(1.0f, 1.0f, 1.0f, 1.0f);
-	if (_mirrorDiagnosticFramesRemaining > 0)
-		logMirrorGLState("mirror-before-clear");
 	GL_CALL(glClear(GL_COLOR_BUFFER_BIT));
 
 	const int cropLeft = MAX(0, MIN(sourceWidth - 1, (int)std::floor(_mirrorCropLeft * sourceWidth)));
@@ -736,9 +554,6 @@ void AndroidGraphicsManager::renderMirrorSurface() {
 			destinationWidth, destinationHeight,
 			(float)cropLeft / sourceWidth, (float)cropTop / sourceHeight,
 			(float)cropRight / sourceWidth, (float)cropBottom / sourceHeight);
-	if (_mirrorRefreshFramePending || _mirrorCursorFramePending)
-		logMirrorTextureLifecycle("mirror source draw issued");
-
 	const bool cursorVisible = _cursorVisible && _cursor && !_overlayVisible && !_gameDrawRect.isEmpty();
 	int cursorSourceX = 0;
 	int cursorSourceY = 0;
@@ -761,20 +576,8 @@ void AndroidGraphicsManager::renderMirrorSurface() {
 		_reportedMirrorCursorGeometryGeneration = _mirrorGeometryGeneration;
 	}
 	const GLenum drawError = glGetError();
-	if (_mirrorDiagnosticFramesRemaining > 0) {
-		LOGI("AdventurePadMirror draw source=%d,%d-%d,%d destinationVertices=[%d,%d %d,%d %d,%d %d,%d] surface=%dx%d glErrorBefore=0x%x glErrorAfter=0x%x",
-				cropLeft, cropTop, cropRight, cropBottom, destinationX, destinationY,
-				destinationX + destinationWidth, destinationY,
-				destinationX, destinationY + destinationHeight,
-				destinationX + destinationWidth, destinationY + destinationHeight,
-				surfaceWidth, surfaceHeight,
-				beforeDrawError, drawError);
-		logMirrorGLState("mirror-after-draw");
-	}
 
 	const bool swapped = beforeDrawError == GL_NO_ERROR && drawError == GL_NO_ERROR && JNI::swapMirrorSurface();
-	if (_mirrorRefreshFramePending || _mirrorCursorFramePending)
-		logMirrorRenderTransition(swapped ? "mirror swap succeeded" : "mirror swap failed");
 	OpenGL::Pipeline::disable();
 	bool primaryRestored = JNI::makePrimarySurfaceCurrent();
 	if (!primaryRestored) {
@@ -791,15 +594,8 @@ void AndroidGraphicsManager::renderMirrorSurface() {
 	if (restore3D && primaryRestored)
 		_renderer3d->enter3D();
 #endif
-	if (_mirrorDiagnosticFramesRemaining > 0) {
-		if (primaryRestored) {
-			logMirrorProjectionState("primary-restored", *primaryTarget,
-					primaryViewport[2], primaryViewport[3], true);
-			logMirrorGLState("primary-restored");
-		}
-		LOGI("AdventurePadMirror primary restoration verified=%d", primaryRestored);
+	if (_mirrorDiagnosticFramesRemaining > 0)
 		--_mirrorDiagnosticFramesRemaining;
-	}
 
 	if (!swapped || !primaryRestored) {
 		if (_pendingCropAckGeneration > 0) {
@@ -971,14 +767,7 @@ bool AndroidGraphicsManager::notifyMousePosition(Common::Point &mouse) {
 	mouse.x = CLIP<int16>(mouse.x, _activeArea.drawRect.left, _activeArea.drawRect.right);
 	mouse.y = CLIP<int16>(mouse.y, _activeArea.drawRect.top, _activeArea.drawRect.bottom);
 
-	const bool moved = mouse.x != _cursorX || mouse.y != _cursorY;
 	setMousePosition(mouse.x, mouse.y);
-	if (moved && _awaitingFirstMirrorCursorMovement) {
-		_awaitingFirstMirrorCursorMovement = false;
-		_mirrorCursorFramePending = true;
-		logMirrorRenderTransition("first cursor movement marked cursor redraw");
-		logMirrorTextureLifecycle("sequence-B first cursor movement received");
-	}
 	mouse = convertWindowToVirtual(mouse.x, mouse.y);
 
 	return true;
