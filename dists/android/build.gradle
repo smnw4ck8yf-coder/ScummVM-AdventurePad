@@ -6,6 +6,23 @@ plugins {
 def srcProperties = new Properties()
 srcProperties.load(new FileInputStream(rootProject.file("src.properties")))
 
+// AdventurePad release credentials remain local and optional so public debug builds
+// do not require access to the private signing identity.
+def adventurePadSigningProperties = new Properties()
+def adventurePadSigningPropertiesFile = rootProject.file("local.properties")
+if (adventurePadSigningPropertiesFile.isFile()) {
+    adventurePadSigningPropertiesFile.withInputStream { adventurePadSigningProperties.load(it) }
+}
+def adventurePadSigningKeys = [
+    "ADVENTUREPAD_RELEASE_STORE_FILE",
+    "ADVENTUREPAD_RELEASE_STORE_PASSWORD",
+    "ADVENTUREPAD_RELEASE_KEY_ALIAS",
+    "ADVENTUREPAD_RELEASE_KEY_PASSWORD"
+]
+def adventurePadSigningConfigured = adventurePadSigningKeys.every {
+    adventurePadSigningProperties.getProperty(it)?.trim()
+}
+
 // Enable to see use of deprecated API
 tasks.withType(JavaCompile).configureEach {
     options.compilerArgs << "-Xlint:deprecation" << "-Xlint:unchecked"
@@ -91,8 +108,22 @@ android {
         // ScummVM 1.8.1:    15
     }
 
+    signingConfigs {
+        if (adventurePadSigningConfigured) {
+            adventurePadRelease {
+                storeFile file(adventurePadSigningProperties.getProperty("ADVENTUREPAD_RELEASE_STORE_FILE"))
+                storePassword adventurePadSigningProperties.getProperty("ADVENTUREPAD_RELEASE_STORE_PASSWORD")
+                keyAlias adventurePadSigningProperties.getProperty("ADVENTUREPAD_RELEASE_KEY_ALIAS")
+                keyPassword adventurePadSigningProperties.getProperty("ADVENTUREPAD_RELEASE_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         debug{
+            if (adventurePadSigningConfigured) {
+                signingConfig signingConfigs.adventurePadRelease
+            }
             applicationIdSuffix ".debug"
             manifestPlaceholders = [nameSuffix:"_debug"]
             debuggable true
@@ -108,6 +139,15 @@ android {
             // Android Gradle plugin.
             shrinkResources = true
 
+        }
+        adventurepadRelease {
+            initWith release
+            if (adventurePadSigningConfigured) {
+                signingConfig signingConfigs.adventurePadRelease
+            }
+            applicationIdSuffix ".debug"
+            manifestPlaceholders = [nameSuffix:"_debug"]
+            matchingFallbacks = ["release"]
         }
     }
     sourceSets {
