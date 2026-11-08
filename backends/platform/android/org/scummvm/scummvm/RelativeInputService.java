@@ -45,6 +45,7 @@ import java.util.Comparator;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.HashMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 /** Receives bounded relative pointer deltas from the separately installed AdventurePad app. */
 public final class RelativeInputService extends Service {
@@ -69,6 +70,7 @@ public final class RelativeInputService extends Service {
 	private static final int MSG_REMOVE_GAME_RESULT = 209;
 	private static final String KEY_TARGETS = "targets";
 	private static final String KEY_TARGET_ID = "targetId";
+	private static final String KEY_LAUNCH_ORIGIN = "launchOrigin";
 	private static final String KEY_TITLE = "title";
 	private static final String KEY_ENGINE_ID = "engineId";
 	private static final String KEY_GAME_ID = "gameId";
@@ -80,6 +82,11 @@ public final class RelativeInputService extends Service {
 	private static final String KEY_REMOVED = "removed";
 	private static final String EXTRA_ADVENTUREPAD_FACADE =
 		"org.scummvm.scummvm.extra.ADVENTUREPAD_FACADE";
+	private static final String EXTRA_ADVENTUREPAD_LAUNCH_ORIGIN =
+		"org.scummvm.scummvm.extra.ADVENTUREPAD_LAUNCH_ORIGIN";
+	private static final String EXTRA_ADVENTUREPAD_LAUNCH_SESSION_ID =
+		"org.scummvm.scummvm.extra.ADVENTUREPAD_LAUNCH_SESSION_ID";
+	private static final AtomicLong NEXT_LAUNCH_SESSION_ID = new AtomicLong();
 	private static final String EXTRA_ADVENTUREPAD_ADVANCED =
 		"org.scummvm.scummvm.extra.ADVENTUREPAD_ADVANCED";
 	private static final String EXTRA_ADVENTUREPAD_ADD_GAME =
@@ -98,6 +105,12 @@ public final class RelativeInputService extends Service {
 	private static boolean _nativeStartupInProgress;
 	private static volatile RelativeInputService _activeService;
 	private Messenger _libraryRecipient;
+
+	@Override
+	public void onCreate() {
+		super.onCreate();
+		AdventurePadLaunchSessionState.configureLogging(this);
+	}
 
 	private static final class SaveCapability {
 		final int latestSlot;
@@ -159,22 +172,53 @@ public final class RelativeInputService extends Service {
 	private static int _mirrorSourceCapability;
 	private static int _mirrorSourceOrientation;
 	private static long _mirrorGeometryGeneration;
+	private static boolean _guiOverlayVisible;
+	private static long _bridgeStateGeneration = 1;
+	private static long _geometryQueryGeneration;
 
 	static void setCurrentGameTarget(String target) {
 		String newTarget = target == null ? "" : target;
 		ScummVM sink;
+		long stateGeneration;
 		synchronized (RelativeInputService.class) {
 			if (newTarget.equals(_currentGameTarget))
 				return;
 			_currentGameTarget = newTarget;
+			stateGeneration = ++_bridgeStateGeneration;
 			sink = _nativeEventSink;
 		}
 		if (sink != null)
-			sink.reportCurrentGameTargetChanged(newTarget);
+			sink.reportCurrentGameTargetChanged(newTarget, stateGeneration);
 	}
 
 	static String getCurrentGameTarget() {
 		return _currentGameTarget;
+	}
+
+	static void setGuiOverlayVisible(boolean visible) {
+		ScummVM sink;
+		long stateGeneration;
+		synchronized (RelativeInputService.class) {
+			if (_guiOverlayVisible == visible)
+				return;
+			_guiOverlayVisible = visible;
+			stateGeneration = ++_bridgeStateGeneration;
+			sink = _nativeEventSink;
+		}
+		if (sink != null)
+			sink.reportGuiOverlayVisibilityChanged(stateGeneration);
+	}
+
+	static synchronized boolean isGuiOverlayVisibleDuringGameplay() {
+		return _guiOverlayVisible && !_currentGameTarget.isEmpty();
+	}
+
+	static synchronized long getBridgeStateGeneration() {
+		return _bridgeStateGeneration;
+	}
+
+	static synchronized long getGeometryQueryGeneration() {
+		return _geometryQueryGeneration;
 	}
 
 	private double _fractionalResidualX;
@@ -294,17 +338,20 @@ public final class RelativeInputService extends Service {
 				replyWithGameLibrary(message.replyTo);
 				return;
 			case MSG_LAUNCH_GAME_TARGET:
-				launchGameTarget(message.getData().getString(KEY_TARGET_ID));
+				launchGameTarget(message.getData().getString(KEY_TARGET_ID),
+					message.getData().getString(KEY_LAUNCH_ORIGIN));
 				return;
 			case MSG_OPEN_SCUMMVM_LIBRARY:
 				openScummVMLibrary();
 				return;
 			case MSG_RESUME_GAME_TARGET:
 				resumeGameTarget(message.getData().getString(KEY_TARGET_ID),
-					message.getData().getInt(KEY_RESUME_SAVE_SLOT, -1));
+					message.getData().getInt(KEY_RESUME_SAVE_SLOT, -1),
+					message.getData().getString(KEY_LAUNCH_ORIGIN));
 				return;
 			case MSG_LOAD_GAME_TARGET:
-				openLoadGame(message.getData().getString(KEY_TARGET_ID));
+				openLoadGame(message.getData().getString(KEY_TARGET_ID),
+					message.getData().getString(KEY_LAUNCH_ORIGIN));
 				return;
 			case MSG_REFRESH_SAVE_CAPABILITIES:
 				requestSaveCapabilityRefresh(message.replyTo);
@@ -443,7 +490,7 @@ public final class RelativeInputService extends Service {
 			return value == null || value.trim().isEmpty() ? fallback : value;
 		}
 
-		private void launchGameTarget(String targetId) {
+		private void launchGameTarget(String targetId, String launchOrigin) {
 			if (targetId == null || targetId.isEmpty()) {
 				Log.w(TAG, "Rejected blank AdventurePad target launch");
 				return;
@@ -452,8 +499,22 @@ public final class RelativeInputService extends Service {
 				Uri.fromParts("scummvm", targetId, null));
 			intent.setComponent(new ComponentName(RelativeInputService.this, ScummVMActivity.class));
 			intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-			intent.putExtra(EXTRA_ADVENTUREPAD_FACADE, true);
+			putLaunchProvenance(intent, launchOrigin);
 			startActivity(intent);
+		}
+
+		private void putLaunchProvenance(Intent intent, String launchOrigin) {
+			String origin = AdventurePadLaunchSessionState.normalizeOrigin(launchOrigin);
+			long sessionId = NEXT_LAUNCH_SESSION_ID.incrementAndGet();
+			Uri data = intent.getData();
+			AdventurePadLaunchSessionState.log(
+				"dispatch target=" + (data == null ? "<none>" : data.getSchemeSpecificPart()) +
+				" rawOrigin=" + launchOrigin + " origin=" + origin +
+				" session=" + sessionId);
+			intent.putExtra(EXTRA_ADVENTUREPAD_FACADE,
+				!AdventurePadLaunchSessionState.DIRECT_SCUMMVM.equals(origin));
+			intent.putExtra(EXTRA_ADVENTUREPAD_LAUNCH_ORIGIN, origin);
+			intent.putExtra(EXTRA_ADVENTUREPAD_LAUNCH_SESSION_ID, sessionId);
 		}
 
 		private void openScummVMLibrary() {
@@ -528,7 +589,7 @@ public final class RelativeInputService extends Service {
 			}
 		}
 
-		private void resumeGameTarget(String targetId, int saveSlot) {
+		private void resumeGameTarget(String targetId, int saveSlot, String launchOrigin) {
 			if (targetId == null || targetId.isEmpty() || saveSlot < 0) {
 				Log.w(TAG, "Rejected invalid AdventurePad resume request");
 				return;
@@ -536,12 +597,12 @@ public final class RelativeInputService extends Service {
 			Intent intent = new Intent(Intent.ACTION_MAIN, Uri.fromParts("scummvm", targetId, null));
 			intent.setComponent(new ComponentName(RelativeInputService.this, ScummVMActivity.class));
 			intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-			intent.putExtra(EXTRA_ADVENTUREPAD_FACADE, true);
+			putLaunchProvenance(intent, launchOrigin);
 			intent.putExtra(EXTRA_ADVENTUREPAD_SAVE_SLOT, saveSlot);
 			startActivity(intent);
 		}
 
-		private void openLoadGame(String targetId) {
+		private void openLoadGame(String targetId, String launchOrigin) {
 			if (targetId == null || targetId.isEmpty()) {
 				Log.w(TAG, "Rejected blank AdventurePad load request");
 				return;
@@ -551,6 +612,7 @@ public final class RelativeInputService extends Service {
 			intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
 			intent.putExtra(EXTRA_ADVENTUREPAD_ADVANCED, true);
 			intent.putExtra(EXTRA_ADVENTUREPAD_LOAD_TARGET, targetId);
+			putLaunchProvenance(intent, launchOrigin);
 			startActivity(intent);
 		}
 
@@ -616,15 +678,24 @@ public final class RelativeInputService extends Service {
 		}
 
 		private void queryMirrorGeometry(Message message) {
-			synchronized (RelativeInputService.class) {
-				_geometryRecipient = message.replyTo;
+			long queryGeneration = message.getData().getLong(
+				MirrorSurfaceProtocol.KEY_QUERY_GENERATION, 0);
+			boolean subscribe = message.getData().getBoolean(
+				MirrorSurfaceProtocol.KEY_SUBSCRIBE_GEOMETRY, false);
+			if (subscribe) {
+				synchronized (RelativeInputService.class) {
+					_geometryRecipient = message.replyTo;
+					_geometryQueryGeneration = queryGeneration;
+				}
 			}
 			ScummVM sink = _nativeEventSink;
 			if (sink == null || !sink.isMirrorOutputEnabled()) {
-				MirrorSurfaceProtocol.sendGeometry(message.replyTo, 0, 0, 0, 0, getCurrentGameTarget(), 0);
+				MirrorSurfaceProtocol.sendGeometry(message.replyTo, 0, 0, 0, 0,
+					getCurrentGameTarget(), 0, isGuiOverlayVisibleDuringGameplay(),
+					getBridgeStateGeneration(), queryGeneration);
 				return;
 			}
-			sink.queueMirrorGeometryQuery(message.replyTo);
+			sink.queueMirrorGeometryQuery(message.replyTo, queryGeneration, subscribe);
 		}
 
 		private void applyMirrorCrop(Message message) {

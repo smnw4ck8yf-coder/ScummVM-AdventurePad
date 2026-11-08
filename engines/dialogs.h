@@ -55,12 +55,14 @@ public:
 	~MainMenuDialog();
 
 	virtual void handleCommand(GUI::CommandSender *sender, uint32 cmd, uint32 data) override;
+	virtual void open() override;
 
 	virtual void reflowLayout() override;
 
 protected:
 	void save();
 	void load();
+	void updateReturnToLauncherLabel();
 
 protected:
 	Engine *_engine;

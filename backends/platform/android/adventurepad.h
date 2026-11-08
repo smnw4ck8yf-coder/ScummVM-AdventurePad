@@ -27,6 +27,7 @@
 namespace Android {
 
 bool isAdventurePadAdvancedLaunch();
+bool isAdventurePadFacadeLaunch();
 bool isAdventurePadAddGameLaunch();
 bool isAdventurePadSaveCapabilityRefreshLaunch();
 Common::String getAdventurePadLoadTarget();
@@ -38,6 +39,10 @@ void finishAdventurePadSaveCapabilities();
 void finishAdventurePadGameRemoval(const Common::String &target, bool removed,
 		const Common::String &error);
 void returnToAdventurePad();
+void requestReturnToAdventurePadAfterGame();
+void resolveReturnToAdventurePadRequest(bool accepted);
+void requestAdventurePadQuit();
+void resolveAdventurePadQuitRequest(bool accepted);
 
 } // namespace Android
 

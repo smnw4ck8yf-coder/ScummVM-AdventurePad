@@ -45,6 +45,10 @@
 #include "engines/engine.h"
 #include "engines/metaengine.h"
 
+#if defined(ANDROID_BACKEND)
+#include "backends/platform/android/adventurepad.h"
+#endif
+
 MainMenuDialog::MainMenuDialog(Engine *engine)
 	: GUI::Dialog("GlobalMenu"), _engine(engine) {
 	_backgroundType = GUI::ThemeEngine::kDialogBackgroundSpecial;
@@ -84,10 +88,18 @@ MainMenuDialog::MainMenuDialog(Engine *engine)
 
 	new GUI::ButtonWidget(this, "GlobalMenu.About", _("~A~bout"), Common::U32String(), kAboutCmd);
 
+	bool adventurePadFacadeLaunch = false;
+#if defined(ANDROID_BACKEND)
+	adventurePadFacadeLaunch = Android::isAdventurePadFacadeLaunch();
+#endif
 	if (g_gui.getGUIWidth() > 320)
-		_returnToLauncherButton = new GUI::ButtonWidget(this, "GlobalMenu.ReturnToLauncher", _("~R~eturn to Launcher"), Common::U32String(), kLauncherCmd);
+		_returnToLauncherButton = new GUI::ButtonWidget(this, "GlobalMenu.ReturnToLauncher",
+			adventurePadFacadeLaunch ? _("~R~eturn to AdventurePad") : _("~R~eturn to Launcher"),
+			Common::U32String(), kLauncherCmd);
 	else
-		_returnToLauncherButton = new GUI::ButtonWidget(this, "GlobalMenu.ReturnToLauncher", _c("~R~eturn to Launcher", "lowres"), Common::U32String(), kLauncherCmd);
+		_returnToLauncherButton = new GUI::ButtonWidget(this, "GlobalMenu.ReturnToLauncher",
+			adventurePadFacadeLaunch ? _c("~R~eturn to AdventurePad", "lowres") :
+				_c("~R~eturn to Launcher", "lowres"), Common::U32String(), kLauncherCmd);
 	_returnToLauncherButton->setEnabled(_engine->hasFeature(Engine::kSupportsReturnToLauncher));
 
 	if (!g_system->hasFeature(OSystem::kFeatureNoQuit) && (!(ConfMan.getBool("gui_return_to_launcher_at_exit")) || !_engine->hasFeature(Engine::kSupportsReturnToLauncher)))
@@ -102,6 +114,25 @@ MainMenuDialog::~MainMenuDialog() {
 	delete _aboutDialog;
 	delete _loadDialog;
 	delete _saveDialog;
+}
+
+void MainMenuDialog::open() {
+	updateReturnToLauncherLabel();
+	GUI::Dialog::open();
+}
+
+void MainMenuDialog::updateReturnToLauncherLabel() {
+	bool adventurePadFacadeLaunch = false;
+#if defined(ANDROID_BACKEND)
+	adventurePadFacadeLaunch = Android::isAdventurePadFacadeLaunch();
+#endif
+	if (g_gui.getGUIWidth() > 320)
+		_returnToLauncherButton->setLabel(_returnToLauncherButton->cleanupHotkey(
+			adventurePadFacadeLaunch ? _("~R~eturn to AdventurePad") : _("~R~eturn to Launcher")));
+	else
+		_returnToLauncherButton->setLabel(_returnToLauncherButton->cleanupHotkey(
+			adventurePadFacadeLaunch ? _c("~R~eturn to AdventurePad", "lowres") :
+				_c("~R~eturn to Launcher", "lowres")));
 }
 
 void MainMenuDialog::handleCommand(GUI::CommandSender *sender, uint32 cmd, uint32 data) {
@@ -137,6 +168,10 @@ void MainMenuDialog::handleCommand(GUI::CommandSender *sender, uint32 cmd, uint3
 		}
 		break;
 	case kLauncherCmd: {
+#if defined(ANDROID_BACKEND)
+		if (Android::isAdventurePadFacadeLaunch())
+			Android::requestReturnToAdventurePadAfterGame();
+#endif
 		Common::Event eventReturnToLauncher;
 		eventReturnToLauncher.type = Common::EVENT_RETURN_TO_LAUNCHER;
 		g_system->getEventManager()->pushEvent(eventReturnToLauncher);
@@ -144,6 +179,9 @@ void MainMenuDialog::handleCommand(GUI::CommandSender *sender, uint32 cmd, uint3
 		}
 		break;
 	case kQuitCmd: {
+#if defined(ANDROID_BACKEND)
+		Android::requestAdventurePadQuit();
+#endif
 		Common::Event eventQ;
 		eventQ.type = Common::EVENT_QUIT;
 		g_system->getEventManager()->pushEvent(eventQ);
@@ -160,10 +198,7 @@ void MainMenuDialog::reflowLayout() {
 	// Update labels when it might be needed
 	// FIXME: it might be better to declare GUI::StaticTextWidget::setLabel() virtual
 	// and to reimplement it in GUI::ButtonWidget to handle the hotkey.
-	if (g_gui.getGUIWidth() > 320)
-		_returnToLauncherButton->setLabel(_returnToLauncherButton->cleanupHotkey(_("~R~eturn to Launcher")));
-	else
-		_returnToLauncherButton->setLabel(_returnToLauncherButton->cleanupHotkey(_c("~R~eturn to Launcher", "lowres")));
+	updateReturnToLauncherLabel();
 
 #ifndef DISABLE_FANCY_THEMES
 	if (g_gui.xmlEval()->getVar("Globals.ShowGlobalMenuLogo", 0) == 1 && g_gui.theme()->supportsImages()) {

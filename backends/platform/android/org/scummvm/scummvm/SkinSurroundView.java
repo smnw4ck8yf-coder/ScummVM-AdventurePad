@@ -48,6 +48,7 @@ public final class SkinSurroundView extends View {
 	private long _loadGeneration;
 	private Bitmap _bitmap;
 	private boolean _splitViewActive;
+	private boolean _guiOverlayVisible;
 	private final ContentObserver _observer = new ContentObserver(new Handler(Looper.getMainLooper())) {
 		@Override
 		public void onChange(boolean selfChange, Uri uri) { loadCurrentTarget(); }
@@ -105,9 +106,16 @@ public final class SkinSurroundView extends View {
 		invalidate();
 	}
 
+	public void setGuiOverlayVisible(boolean visible) {
+		if (_guiOverlayVisible == visible) return;
+		_guiOverlayVisible = visible;
+		invalidate();
+	}
+
 	@Override
 	protected void onDraw(Canvas canvas) {
 		super.onDraw(canvas);
+		if (_guiOverlayVisible) return;
 		Bitmap bitmap = _bitmap;
 		_destination.set(0, 0, getWidth(), getHeight());
 		if (_splitViewActive) {

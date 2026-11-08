@@ -73,6 +73,10 @@ final class MirrorSurfaceProtocol {
 	static final String KEY_POINTER_ID = "pointerId";
 	static final String KEY_POINTER_SEQUENCE_ID = "pointerSequenceId";
 	static final String KEY_CURSOR_VISIBLE = "cursorVisible";
+	static final String KEY_GUI_OVERLAY_VISIBLE = "guiOverlayVisible";
+	static final String KEY_BRIDGE_STATE_GENERATION = "bridgeStateGeneration";
+	static final String KEY_QUERY_GENERATION = "queryGeneration";
+	static final String KEY_SUBSCRIBE_GEOMETRY = "subscribeGeometry";
 
 	static final int STATUS_SUPPORTED = 1;
 	static final int STATUS_UNSUPPORTED_NO_TEXTURE = 2;
@@ -117,7 +121,8 @@ final class MirrorSurfaceProtocol {
 	}
 
 	static void sendGeometry(Messenger recipient, int width, int height, int capability,
-			long generation, String gameId, int orientation) {
+			long generation, String gameId, int orientation, boolean guiOverlayVisible,
+			long bridgeStateGeneration, long queryGeneration) {
 		if (recipient == null)
 			return;
 		Bundle data = new Bundle();
@@ -127,6 +132,9 @@ final class MirrorSurfaceProtocol {
 		data.putLong(KEY_GEOMETRY_GENERATION, generation);
 		data.putString(KEY_GAME_ID, gameId == null ? "" : gameId);
 		data.putInt(KEY_ORIENTATION, orientation);
+		data.putBoolean(KEY_GUI_OVERLAY_VISIBLE, guiOverlayVisible);
+		data.putLong(KEY_BRIDGE_STATE_GENERATION, bridgeStateGeneration);
+		data.putLong(KEY_QUERY_GENERATION, queryGeneration);
 		send(recipient, MSG_GEOMETRY, data);
 	}
 

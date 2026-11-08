@@ -166,7 +166,11 @@ public abstract class ScummVM implements SurfaceHolder.Callback,
 	/** @noinspection unused */ @Keep
 	abstract protected void setAdventurePadSplitViewActive(boolean active);
 	/** @noinspection unused */ @Keep
+	abstract protected void setAdventurePadGuiOverlayVisible(boolean visible);
+	/** @noinspection unused */ @Keep
 	abstract protected boolean isAdventurePadAdvancedLaunch();
+	/** @noinspection unused */ @Keep
+	abstract protected boolean isAdventurePadFacadeLaunch();
 	/** @noinspection unused */ @Keep
 	abstract protected boolean isAdventurePadAddGameLaunch();
 	/** @noinspection unused */ @Keep
@@ -186,6 +190,14 @@ public abstract class ScummVM implements SurfaceHolder.Callback,
 	abstract protected void finishAdventurePadGameRemoval(String target, boolean removed, String error);
 	/** @noinspection unused */ @Keep
 	abstract protected void returnToAdventurePad();
+	/** @noinspection unused */ @Keep
+	abstract protected void requestReturnToAdventurePadAfterGame();
+	/** @noinspection unused */ @Keep
+	abstract protected void resolveReturnToAdventurePadRequest(boolean accepted);
+	/** @noinspection unused */ @Keep
+	abstract protected void requestAdventurePadQuit();
+	/** @noinspection unused */ @Keep
+	abstract protected void resolveAdventurePadQuitRequest(boolean accepted);
 	/** @noinspection unused */ @Keep
 	abstract protected void notifyHTTPService(int localPort, boolean minimal);
 	/** @noinspection unused */ @Keep
@@ -233,13 +245,17 @@ public abstract class ScummVM implements SurfaceHolder.Callback,
 		queueUpperPresentationFallback();
 	}
 
-	final void queueMirrorGeometryQuery(Messenger recipient) {
+	final void queueMirrorGeometryQuery(Messenger recipient, long queryGeneration, boolean subscribe) {
 		synchronized (_mirror_crop_lock) {
-			_geometry_recipient = recipient;
+			if (subscribe)
+				_geometry_recipient = recipient;
 			if (_mirror_source_width > 0 && _mirror_source_height > 0) {
 				MirrorSurfaceProtocol.sendGeometry(recipient, _mirror_source_width,
 					_mirror_source_height, _mirror_source_capability, _mirror_geometry_generation,
-					RelativeInputService.getCurrentGameTarget(), _mirror_source_orientation);
+					RelativeInputService.getCurrentGameTarget(), _mirror_source_orientation,
+					RelativeInputService.isGuiOverlayVisibleDuringGameplay(),
+					RelativeInputService.getBridgeStateGeneration(),
+					queryGeneration);
 			}
 		}
 	}
@@ -267,12 +283,19 @@ public abstract class ScummVM implements SurfaceHolder.Callback,
 		}
 	}
 
-	final void reportCurrentGameTargetChanged(String target) {
+	final void reportCurrentGameTargetChanged(String target, long bridgeStateGeneration) {
 		synchronized (_mirror_crop_lock) {
 			invalidateMirrorGeometryLocked();
-			publishMirrorGeometryLocked(target);
+			publishMirrorGeometryLocked(target, bridgeStateGeneration);
 		}
 		requestMirrorRefresh("GEOMETRY target=" + target);
+	}
+
+	final void reportGuiOverlayVisibilityChanged(long bridgeStateGeneration) {
+		synchronized (_mirror_crop_lock) {
+			publishMirrorGeometryLocked(RelativeInputService.getCurrentGameTarget(),
+				bridgeStateGeneration);
+		}
 	}
 
 	final void queueMirrorCrop(float left, float top, float right, float bottom,
@@ -551,9 +574,16 @@ public abstract class ScummVM implements SurfaceHolder.Callback,
 	}
 
 	private void publishMirrorGeometryLocked(String target) {
+		publishMirrorGeometryLocked(target, RelativeInputService.getBridgeStateGeneration());
+	}
+
+	private void publishMirrorGeometryLocked(String target, long bridgeStateGeneration) {
 		MirrorSurfaceProtocol.sendGeometry(_geometry_recipient, _mirror_source_width,
 			_mirror_source_height, _mirror_source_capability, _mirror_geometry_generation,
-			target, _mirror_source_orientation);
+			target, _mirror_source_orientation,
+			RelativeInputService.isGuiOverlayVisibleDuringGameplay(),
+			bridgeStateGeneration,
+			RelativeInputService.getGeometryQueryGeneration());
 		RelativeInputService.rememberMirrorSourceGeometry(this, _mirror_source_width,
 			_mirror_source_height, _mirror_source_capability, _mirror_source_orientation,
 			_mirror_geometry_generation);

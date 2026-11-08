@@ -187,6 +187,10 @@ public class ScummVMActivity extends Activity {
 	private boolean _adventurePadLaunchAttempted = false;
 	private static final String EXTRA_ADVENTUREPAD_FACADE =
 		"org.scummvm.scummvm.extra.ADVENTUREPAD_FACADE";
+	private static final String EXTRA_ADVENTUREPAD_LAUNCH_ORIGIN =
+		"org.scummvm.scummvm.extra.ADVENTUREPAD_LAUNCH_ORIGIN";
+	private static final String EXTRA_ADVENTUREPAD_LAUNCH_SESSION_ID =
+		"org.scummvm.scummvm.extra.ADVENTUREPAD_LAUNCH_SESSION_ID";
 	private static final String EXTRA_ADVENTUREPAD_ADVANCED =
 		"org.scummvm.scummvm.extra.ADVENTUREPAD_ADVANCED";
 	private static final String EXTRA_ADVENTUREPAD_ADD_GAME =
@@ -199,8 +203,17 @@ public class ScummVMActivity extends Activity {
 		"org.scummvm.scummvm.extra.ADVENTUREPAD_SAVE_CAPABILITY_REFRESH";
 	private static final String EXTRA_ADVENTUREPAD_REMOVE_TARGET =
 		"org.scummvm.scummvm.extra.ADVENTUREPAD_REMOVE_TARGET";
-	private boolean _adventurePadFacadeLaunch = false;
+	private static final String ADVENTURE_PAD_RETURN_ACTIVITY =
+		"com.jamesmoran.adventurepad.ReturnToAdventurePadActivity";
+	private static final String EXTRA_ADVENTUREPAD_RETURN_DESTINATION =
+		"com.jamesmoran.adventurepad.extra.RETURN_DESTINATION";
+	private static final String ADVENTURE_PAD_RETURN_ANDROID_HOME = "ANDROID_HOME";
+	private volatile boolean _adventurePadFacadeLaunch = false;
 	private boolean _adventurePadFacadeGameStarted = false;
+	private final AdventurePadLaunchSessionState _adventurePadLaunchSession =
+		new AdventurePadLaunchSessionState();
+	private final AdventurePadExplicitReturnState _adventurePadExplicitReturn =
+		new AdventurePadExplicitReturnState();
 	private volatile boolean _adventurePadAdvancedLaunch = false;
 	private volatile boolean _adventurePadAddGameLaunch = false;
 	private volatile boolean _adventurePadSaveCapabilityRefreshLaunch = false;
@@ -924,14 +937,34 @@ public class ScummVMActivity extends Activity {
 		@Override
 		protected void setCurrentGame(String target) {
 			RelativeInputService.setCurrentGameTarget(target);
+			_adventurePadLaunchSession.observeTarget(target);
 			runOnUiThread(() -> {
 				if (_skinSurroundView != null)
 					_skinSurroundView.setGameTarget(target, _adventurePadAdvancedLaunch);
 			});
-			if (_adventurePadFacadeLaunch) {
+			if (_adventurePadExplicitReturn.consumeForTarget(target)) {
+				_adventurePadLaunchSession.cancelPendingExit();
+				_adventurePadFacadeLaunch = false;
+				_adventurePadFacadeGameStarted = false;
+				runOnUiThread(() -> {
+					launchAdventurePadReturn();
+					finish();
+				});
+			} else if (_adventurePadLaunchSession.consumeFirstPartyHome(target)) {
+				_adventurePadFacadeLaunch = false;
+				_adventurePadFacadeGameStarted = false;
+				AdventurePadLaunchSessionState.log(
+					"home enqueue session=" + _adventurePadLaunchSession.sessionId());
+				runOnUiThread(() -> {
+					AdventurePadLaunchSessionState.log(
+						"home execute session=" + _adventurePadLaunchSession.sessionId());
+					launchAdventurePadHome();
+					finish();
+				});
+			} else if (_adventurePadFacadeLaunch) {
 				if (target != null && !target.isEmpty()) {
 					_adventurePadFacadeGameStarted = true;
-				} else if (_adventurePadFacadeGameStarted) {
+				} else if (_adventurePadLaunchSession.hasObservedGame()) {
 					_adventurePadFacadeLaunch = false;
 					_adventurePadFacadeGameStarted = false;
 					runOnUiThread(new Runnable() {
@@ -948,6 +981,10 @@ public class ScummVMActivity extends Activity {
 			}
 			Intent intent = new Intent(Intent.ACTION_MAIN, data,
 				ScummVMActivity.this, ScummVMActivity.class);
+			intent.putExtra(EXTRA_ADVENTUREPAD_FACADE, _adventurePadLaunchSession.isFacadeLaunch());
+			intent.putExtra(EXTRA_ADVENTUREPAD_LAUNCH_ORIGIN, _adventurePadLaunchSession.origin());
+			intent.putExtra(EXTRA_ADVENTUREPAD_LAUNCH_SESSION_ID,
+				_adventurePadLaunchSession.sessionId());
 			setIntent(intent);
 			Log.d(ScummVM.LOG_TAG, "Current activity Intent is: " + data);
 			if (target != null) {
@@ -973,8 +1010,22 @@ public class ScummVMActivity extends Activity {
 		}
 
 		@Override
+		protected void setAdventurePadGuiOverlayVisible(boolean visible) {
+			RelativeInputService.setGuiOverlayVisible(visible);
+			runOnUiThread(() -> {
+				if (_skinSurroundView != null)
+					_skinSurroundView.setGuiOverlayVisible(visible);
+			});
+		}
+
+		@Override
 		protected boolean isAdventurePadAdvancedLaunch() {
 			return _adventurePadAdvancedLaunch;
+		}
+
+		@Override
+		protected boolean isAdventurePadFacadeLaunch() {
+			return _adventurePadFacadeLaunch;
 		}
 
 		@Override
@@ -1029,9 +1080,31 @@ public class ScummVMActivity extends Activity {
 			runOnUiThread(new Runnable() {
 				@Override
 				public void run() {
+					launchAdventurePadReturn();
 					finish();
 				}
 			});
+		}
+
+		@Override
+		protected void requestReturnToAdventurePadAfterGame() {
+			_adventurePadLaunchSession.cancelPendingExit();
+			_adventurePadExplicitReturn.request(_adventurePadFacadeLaunch);
+		}
+
+		@Override
+		protected void resolveReturnToAdventurePadRequest(boolean accepted) {
+			_adventurePadExplicitReturn.resolve(accepted);
+		}
+
+		@Override
+		protected void requestAdventurePadQuit() {
+			_adventurePadLaunchSession.requestQuit();
+		}
+
+		@Override
+		protected void resolveAdventurePadQuitRequest(boolean accepted) {
+			_adventurePadLaunchSession.resolveQuit(accepted);
 		}
 
 		@Override
@@ -1237,13 +1310,19 @@ public class ScummVMActivity extends Activity {
 		if (adventurePadBridgeOnlyLaunch)
 			setTheme(R.style.SaveCapabilityRefreshTheme);
 		super.onCreate(savedInstanceState);
+		AdventurePadLaunchSessionState.configureLogging(this);
 		if (adventurePadBridgeOnlyLaunch) {
 			WindowManager.LayoutParams attributes = getWindow().getAttributes();
 			attributes.alpha = 0.0f;
 			getWindow().setAttributes(attributes);
 			getWindow().setDimAmount(0.0f);
 		}
-		_adventurePadFacadeLaunch = getIntent().getBooleanExtra(EXTRA_ADVENTUREPAD_FACADE, false);
+		if (savedInstanceState != null)
+			_adventurePadLaunchSession.restore(savedInstanceState);
+		else
+			beginAdventurePadLaunchSession(getIntent());
+		_adventurePadFacadeLaunch = _adventurePadLaunchSession.isFacadeLaunch();
+		_adventurePadFacadeGameStarted = _adventurePadLaunchSession.hasObservedGame();
 		_adventurePadAdvancedLaunch = getIntent().getBooleanExtra(EXTRA_ADVENTUREPAD_ADVANCED, false);
 		_adventurePadAddGameLaunch = getIntent().getBooleanExtra(EXTRA_ADVENTUREPAD_ADD_GAME, false);
 		_adventurePadLoadTarget = getIntent().getStringExtra(EXTRA_ADVENTUREPAD_LOAD_TARGET);
@@ -1472,6 +1551,47 @@ public class ScummVMActivity extends Activity {
 		}
 	}
 
+	private void launchAdventurePadReturn() {
+		Intent intent = new Intent()
+			.setComponent(new ComponentName(ADVENTURE_PAD_PACKAGE, ADVENTURE_PAD_RETURN_ACTIVITY))
+			.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+		try {
+			startActivity(intent);
+		} catch (RuntimeException exception) {
+			Log.e(ADVENTURE_PAD_LOG_TAG, "Could not explicitly return to AdventurePad", exception);
+		}
+	}
+
+	private void launchAdventurePadHome() {
+		Intent intent = new Intent()
+			.setComponent(new ComponentName(ADVENTURE_PAD_PACKAGE, ADVENTURE_PAD_RETURN_ACTIVITY))
+			.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+			.putExtra(EXTRA_ADVENTUREPAD_RETURN_DESTINATION, ADVENTURE_PAD_RETURN_ANDROID_HOME);
+		try {
+			AdventurePadLaunchSessionState.log(
+				"home startActivity session=" + _adventurePadLaunchSession.sessionId());
+			startActivity(intent);
+			AdventurePadLaunchSessionState.log(
+				"home startActivity returned session=" +
+				_adventurePadLaunchSession.sessionId());
+		} catch (RuntimeException exception) {
+			Log.e(ADVENTURE_PAD_LOG_TAG, "Could not return first-party Quit to Android Home", exception);
+		}
+	}
+
+	private void beginAdventurePadLaunchSession(Intent intent) {
+		String origin = intent.getStringExtra(EXTRA_ADVENTUREPAD_LAUNCH_ORIGIN);
+		long sessionId = intent.getLongExtra(EXTRA_ADVENTUREPAD_LAUNCH_SESSION_ID, 0);
+		AdventurePadLaunchSessionState.log(
+			"activity receive origin=" + origin + " session=" + sessionId);
+		boolean changed = _adventurePadLaunchSession.begin(origin, sessionId);
+		if (changed) {
+			_adventurePadExplicitReturn.clear();
+			_adventurePadFacadeGameStarted = false;
+		}
+		_adventurePadFacadeLaunch = _adventurePadLaunchSession.isFacadeLaunch();
+	}
+
 	private Display findEligibleSecondaryDisplay(DisplayManager displayManager) {
 		Display[] discoveredDisplays = displayManager.getDisplays();
 		Log.i(ADVENTURE_PAD_LOG_TAG, "number of displays discovered: " + discoveredDisplays.length);
@@ -1536,8 +1656,7 @@ public class ScummVMActivity extends Activity {
 //		Log.d(ScummVM.LOG_TAG, "onNewIntent: " + intent.getData());
 
 		super.onNewIntent(intent);
-		_adventurePadFacadeLaunch = intent.getBooleanExtra(EXTRA_ADVENTUREPAD_FACADE, false);
-		_adventurePadFacadeGameStarted = false;
+		beginAdventurePadLaunchSession(intent);
 		_adventurePadAdvancedLaunch = intent.getBooleanExtra(EXTRA_ADVENTUREPAD_ADVANCED, false);
 		_adventurePadAddGameLaunch = intent.getBooleanExtra(EXTRA_ADVENTUREPAD_ADD_GAME, false);
 		_adventurePadSaveCapabilityRefreshLaunch = intent.getBooleanExtra(
@@ -1558,6 +1677,11 @@ public class ScummVMActivity extends Activity {
 		// Same game requested, we continue too
 		if (intentData.equals(getIntent().getData()) &&
 				intent.getIntExtra(EXTRA_ADVENTUREPAD_SAVE_SLOT, -1) < 0) {
+			// The engine stays alive, but this is still a newly accepted launch session.
+			// Keep its explicit provenance and mark the already-running target as observed.
+			_adventurePadLaunchSession.observeTarget(intentData.getSchemeSpecificPart());
+			_adventurePadFacadeGameStarted = true;
+			setIntent(intent);
 			return;
 		}
 
@@ -1601,6 +1725,12 @@ public class ScummVMActivity extends Activity {
 
 		_scummvm_thread = new Thread(_scummvm, "ScummVM");
 		_scummvm_thread.start();
+	}
+
+	@Override
+	protected void onSaveInstanceState(@NonNull Bundle outState) {
+		_adventurePadLaunchSession.save(outState);
+		super.onSaveInstanceState(outState);
 	}
 
 	@Override

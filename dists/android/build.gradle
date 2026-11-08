@@ -160,6 +160,9 @@ android {
             res.srcDirs srcProperties['srcdir'] + '/dists/android/res/'
             manifest.srcFile srcProperties['srcdir'] + '/dists/android/AndroidManifest.xml'
         }
+        test {
+            java.srcDirs srcProperties['srcdir'] + '/dists/android/test/'
+        }
     }
     lint {
         abortOnError = false
@@ -172,4 +175,5 @@ android {
 
 dependencies {
     implementation "androidx.annotation:annotation:1.10.0"
+    testImplementation "junit:junit:4.13.2"
 }

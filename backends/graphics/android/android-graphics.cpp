@@ -659,6 +659,7 @@ void AndroidGraphicsManager::showOverlay(bool inGUI) {
 	}
 
 	OpenGL::OpenGLGraphicsManager::showOverlay(inGUI);
+	JNI::reportAdventurePadGuiOverlayVisible(inGUI);
 }
 
 void AndroidGraphicsManager::hideOverlay() {
@@ -672,6 +673,7 @@ void AndroidGraphicsManager::hideOverlay() {
 	}
 
 	OpenGL::OpenGLGraphicsManager::hideOverlay();
+	JNI::reportAdventurePadGuiOverlayVisible(false);
 }
 
 float AndroidGraphicsManager::getHiDPIScreenFactor() const {

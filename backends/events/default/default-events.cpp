@@ -36,6 +36,10 @@
 #include "gui/debugger.h"
 #include "gui/message.h"
 
+#if defined(ANDROID_BACKEND)
+#include "backends/platform/android/adventurepad.h"
+#endif
+
 DefaultEventManager::DefaultEventManager(Common::EventSource *boss) :
 	_buttonState(0),
 	_modifierState(0),
@@ -204,12 +208,20 @@ bool DefaultEventManager::pollEvent(Common::Event &event) {
 				PauseToken pt;
 				if (g_engine)
 					pt = g_engine->pauseEngine();
-				GUI::MessageDialog alert(_("Do you really want to return to the Launcher?\nAny unsaved progress will be lost."), _("Yes"), _("Cancel"));
+				Common::U32String prompt = _("Do you really want to return to the Launcher?\nAny unsaved progress will be lost.");
+#if defined(ANDROID_BACKEND)
+				if (Android::isAdventurePadFacadeLaunch())
+					prompt = _("Do you really want to return to AdventurePad?\nAny unsaved progress will be lost.");
+#endif
+				GUI::MessageDialog alert(prompt, _("Yes"), _("Cancel"));
 				forwardEvent = _shouldReturnToLauncher = (alert.runModal() == GUI::kMessageOK);
 			}
 			_confirmExitDialogActive = false;
 		} else
 			_shouldReturnToLauncher = true;
+#if defined(ANDROID_BACKEND)
+			Android::resolveReturnToAdventurePadRequest(_shouldReturnToLauncher);
+#endif
 		break;
 
 	case Common::EVENT_MUTE:
@@ -235,6 +247,9 @@ bool DefaultEventManager::pollEvent(Common::Event &event) {
 		} else {
 			_shouldQuit = true;
 		}
+#if defined(ANDROID_BACKEND)
+		Android::resolveAdventurePadQuitRequest(_shouldQuit);
+#endif
 		break;
 
 	case Common::EVENT_DEBUGGER: {

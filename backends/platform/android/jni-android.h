@@ -102,7 +102,9 @@ public:
 	static void setCurrentGame(const Common::String &target);
 	static void reportAdventurePadGameViewport(int left, int top, int right, int bottom,
 			int sourceWidth, int sourceHeight);
+	static void reportAdventurePadGuiOverlayVisible(bool visible);
 	static bool isAdventurePadAdvancedLaunch();
+	static bool isAdventurePadFacadeLaunch();
 	static bool isAdventurePadAddGameLaunch();
 	static bool isAdventurePadSaveCapabilityRefreshLaunch();
 	static Common::String getAdventurePadLoadTarget();
@@ -114,6 +116,10 @@ public:
 	static void finishAdventurePadGameRemoval(const Common::String &target, bool removed,
 			const Common::String &error);
 	static void returnToAdventurePad();
+	static void requestReturnToAdventurePadAfterGame();
+	static void resolveReturnToAdventurePadRequest(bool accepted);
+	static void requestAdventurePadQuit();
+	static void resolveAdventurePadQuitRequest(bool accepted);
 	static void notifyHTTPService(int localPort, bool minimal);
 
 	static inline bool haveSurface();
@@ -197,7 +203,9 @@ private:
 	static jmethodID _MID_getScummVMLogPath;
 	static jmethodID _MID_setCurrentGame;
 	static jmethodID _MID_setAdventurePadGameViewport;
+	static jmethodID _MID_setAdventurePadGuiOverlayVisible;
 	static jmethodID _MID_isAdventurePadAdvancedLaunch;
+	static jmethodID _MID_isAdventurePadFacadeLaunch;
 	static jmethodID _MID_isAdventurePadAddGameLaunch;
 	static jmethodID _MID_isAdventurePadSaveCapabilityRefreshLaunch;
 	static jmethodID _MID_getAdventurePadLoadTarget;
@@ -207,6 +215,10 @@ private:
 	static jmethodID _MID_finishAdventurePadSaveCapabilities;
 	static jmethodID _MID_finishAdventurePadGameRemoval;
 	static jmethodID _MID_returnToAdventurePad;
+	static jmethodID _MID_requestReturnToAdventurePadAfterGame;
+	static jmethodID _MID_resolveReturnToAdventurePadRequest;
+	static jmethodID _MID_requestAdventurePadQuit;
+	static jmethodID _MID_resolveAdventurePadQuitRequest;
 	static jmethodID _MID_notifyHTTPService;
 	static jmethodID _MID_getSysArchives;
 	static jmethodID _MID_getAllStorageLocations;
